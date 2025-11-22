@@ -6,7 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "start": "node ai.js",
-    "dev": "nodemon ai.js"
+    "dev": "nodemon ai.js",
+    "login": "node login.js"
   },
   "keywords": [
     "telegram",
