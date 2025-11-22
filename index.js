@@ -8,7 +8,8 @@ const express = require("express");
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
-const LOGIN_URL = "http://localhost:3000/Login.aspx";
+const LOGIN_URL =
+  "https://haftometir.modabberonline.com/Login.aspx?ReturnUrl=%2f&AspxAutoDetectCookieSupport=1";
 const PORT = process.env.PORT || 3000;
 
 const START = 0;
