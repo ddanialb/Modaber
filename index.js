@@ -202,9 +202,6 @@ function hasAccess(chatId) {
   }
 
   if (authorizedUsers.has(chatIdStr)) {
-    if (usedUsers.has(chatIdStr)) {
-      return { allowed: false, isAdmin: false, reason: "already_used" };
-    }
     return { allowed: true, isAdmin: false, isAuthorized: true };
   }
 
@@ -726,7 +723,7 @@ app.get("/", (req, res) => {
           </div>
           
           <div class="stat-box">
-            <div class="stat-label">📝 Used Users</div>
+            <div class="stat-label">📝 Used Users (Public)</div>
             <div class="stat-value">${usedUsers.size}</div>
           </div>
           
@@ -824,7 +821,7 @@ bot.onText(/\/start/, async (msg) => {
 
     if (access.reason === "already_used") {
       errorMsg += "💡 You have already used this bot.\n";
-      errorMsg += "Each user can only use it once.";
+      errorMsg += "Each public user can only use it once.";
     } else if (access.reason === "no_access") {
       errorMsg += "💡 Please ask admin to grant you access.\n";
       errorMsg += `🆔 Your ID: \`${chatId}\``;
@@ -871,7 +868,9 @@ bot.onText(/\/start/, async (msg) => {
 
 ${
   access.isAdmin
-    ? `\n🔧 *Admin Commands:*\n/allaccess - Toggle public access\n/access <user_id> - Grant user access\n/revoke <user_id> - Revoke user access\n/users - List users\n/todaylog - Today's report\n/resetall - Reset all`
+    ? `\n🔧 *Admin Commands:*\n/allaccess - Toggle public access\n/access <user_id> - Grant permanent access\n/revoke <user_id> - Revoke user access\n/users - List users\n/todaylog - Today's report\n/resetall - Reset all`
+    : access.isAuthorized
+    ? `\n✅ *Your Status:* Authorized (Unlimited access)`
     : `\n⚠️ *Note:* You can only use this bot once!`
 }
   `;
@@ -909,7 +908,7 @@ bot.onText(/\/add (.+)/, async (msg, match) => {
     return;
   }
 
-  if (!access.isAdmin) {
+  if (access.isPublic && !access.isAuthorized) {
     usedUsers.add(chatId.toString());
 
     dailyLog.newUsers.push({
@@ -921,7 +920,7 @@ bot.onText(/\/add (.+)/, async (msg, match) => {
 
     bot.sendMessage(
       chatId,
-      `✅ Starting test for \`${username}\`...\n\n⚠️ You can no longer use this bot.`,
+      `✅ Starting test for \`${username}\`...\n\n⚠️ You can no longer use this bot (public access).`,
       {
         parse_mode: "Markdown",
       }
@@ -1070,7 +1069,9 @@ ${
   access.isAdmin
     ? `\n\n🔓 Public Access: ${
         publicAccessEnabled ? "✅ ON" : "❌ OFF"
-      }\n👥 Authorized Users: ${authorizedUsers.size}\n📝 Used Users: ${
+      }\n👥 Authorized Users (Permanent): ${
+        authorizedUsers.size
+      }\n📝 Used Public Users: ${
         usedUsers.size
       }\n\n📊 Today's Stats:\n   🔔 Requests: ${
         dailyLog.accessRequests.length
@@ -1160,11 +1161,11 @@ bot.onText(/\/allaccess/, async (msg) => {
     `${emoji} *Public Access ${status}!*\n\n` +
       `${
         publicAccessEnabled
-          ? "✅ Everyone can now use the bot (once per user)"
+          ? "✅ Everyone can now use the bot (once per user)\n⚠️ Authorized users have unlimited access"
           : "❌ Only authorized users can use the bot"
       }\n\n` +
-      `👥 Authorized Users: ${authorizedUsers.size}\n` +
-      `📝 Used Users: ${usedUsers.size}`,
+      `👥 Authorized Users (Permanent): ${authorizedUsers.size}\n` +
+      `📝 Used Public Users: ${usedUsers.size}`,
     { parse_mode: "Markdown" }
   );
 });
@@ -1189,12 +1190,9 @@ bot.onText(/\/access (.+)/, async (msg, match) => {
   }
 
   if (authorizedUsers.has(userId)) {
-    bot.sendMessage(
-      chatId,
-      `⚠️ User \`${userId}\` is already authorized!\n\n` +
-        `${usedUsers.has(userId) ? "✅ Already used" : "❌ Not used yet"}`,
-      { parse_mode: "Markdown" }
-    );
+    bot.sendMessage(chatId, `⚠️ User \`${userId}\` is already authorized!`, {
+      parse_mode: "Markdown",
+    });
     return;
   }
 
@@ -1207,19 +1205,19 @@ bot.onText(/\/access (.+)/, async (msg, match) => {
 
   bot.sendMessage(
     chatId,
-    `✅ *Access Granted!*\n\n` +
+    `✅ *Permanent Access Granted!*\n\n` +
       `🆔 User ID: \`${userId}\`\n` +
       `👥 Total Authorized: ${authorizedUsers.size}\n\n` +
-      `💡 User can use the bot once.`,
+      `💡 User can use the bot unlimited times until revoked.`,
     { parse_mode: "Markdown" }
   );
 
   try {
     await bot.sendMessage(
       userId,
-      `🎉 *Access Granted!*\n\n` +
-        `✅ You can now use the bot.\n` +
-        `⚠️ Note: You can only use it once!\n\n` +
+      `🎉 *Permanent Access Granted!*\n\n` +
+        `✅ You now have unlimited access to this bot.\n` +
+        `♾️ You can use it as many times as you want!\n\n` +
         `💡 Use /start to begin.`,
       { parse_mode: "Markdown" }
     );
@@ -1297,16 +1295,15 @@ bot.onText(/\/users/, async (msg) => {
   }\n\n`;
 
   if (authorizedUsers.size > 0) {
-    message += `✅ *Authorized Users:* (${authorizedUsers.size})\n`;
+    message += `✅ *Authorized Users (Permanent):* (${authorizedUsers.size})\n`;
     authorizedUsers.forEach((userId) => {
-      const used = usedUsers.has(userId) ? "✅" : "❌";
-      message += `   ${used} \`${userId}\`\n`;
+      message += `   ♾️ \`${userId}\`\n`;
     });
   } else {
     message += `⚠️ No authorized users\n`;
   }
 
-  message += `\n📝 *Total Used:* ${usedUsers.size}\n`;
+  message += `\n📝 *Used Public Users (One-time):* ${usedUsers.size}\n`;
 
   bot.sendMessage(chatId, message, { parse_mode: "Markdown" });
 });
@@ -1336,7 +1333,7 @@ bot.onText(/\/resetall/, async (msg) => {
     chatId,
     `🔄 *Full Reset Complete!*\n\n` +
       `✅ ${tasksCount} tests stopped\n` +
-      `✅ ${usersCount} used users cleared\n` +
+      `✅ ${usersCount} used public users cleared\n` +
       `✅ ${authCount} authorized users cleared\n` +
       `✅ Public access disabled\n\n` +
       `💡 System ready for use\n` +
@@ -1374,8 +1371,10 @@ Shows current password and last 10 tests
 
 ${
   access.isAdmin
-    ? `\n🔧 *Admin Commands:*\n\n*5️⃣ Toggle public access:*\n\`/allaccess\`\n\n*6️⃣ Grant user access:*\n\`/access <user_id>\`\n\n*7️⃣ Revoke user access:*\n\`/revoke <user_id>\`\n\n*8️⃣ List users:*\n\`/users\`\n\n*9️⃣ Today's report:*\n\`/todaylog\`\n\n*🔟 Full reset:*\n\`/resetall\`\n\n📊 *Auto Reporting:*\n• Daily report sent at ${DAILY_REPORT_HOUR}:00`
-    : `\n⚠️ *Limitation:*\nYou can only use this bot once!\n\n🆔 Your ID: \`${chatId}\``
+    ? `\n🔧 *Admin Commands:*\n\n*5️⃣ Toggle public access:*\n\`/allaccess\`\n\n*6️⃣ Grant permanent access:*\n\`/access <user_id>\` - Unlimited usage\n\n*7️⃣ Revoke user access:*\n\`/revoke <user_id>\`\n\n*8️⃣ List users:*\n\`/users\`\n\n*9️⃣ Today's report:*\n\`/todaylog\`\n\n*🔟 Full reset:*\n\`/resetall\`\n\n📊 *Access Types:*\n• Admin: Full unlimited access\n• Authorized (/access): Unlimited until revoked\n• Public: One-time usage only\n\n📊 *Auto Reporting:*\n• Daily report sent at ${DAILY_REPORT_HOUR}:00`
+    : access.isAuthorized
+    ? `\n✅ *Your Status:*\nAuthorized user - Unlimited access!`
+    : `\n⚠️ *Limitation:*\nPublic users can only use this bot once!\n\n🆔 Your ID: \`${chatId}\``
 }
 
 💡 *Tips:*
