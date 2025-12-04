@@ -52,6 +52,11 @@ let botStats = {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function escapeMarkdown(text) {
+  if (!text) return "";
+  return text.replace(/([_*`\[])/g, "\\$1");
+}
+
 function logReceivedMessage(msg) {
   const logEntry = {
     time: new Date().toISOString(),
@@ -1585,9 +1590,12 @@ bot.onText(/\/users/, async (msg) => {
         });
       }
 
-      message += `   ♾️ \`${userId}\` - ${displayName}`;
+      const safeName = escapeMarkdown(displayName);
+      const safeUsername = escapeMarkdown(displayUsername);
+
+      message += `   ♾️ \`${userId}\` - ${safeName}`;
       if (displayUsername !== "no_username") {
-        message += ` (@${displayUsername})`;
+        message += ` (@${safeUsername})`;
       }
       message += `\n`;
     }
